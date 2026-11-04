@@ -4,6 +4,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-04
+
 ### Added
 
 - Repo mit Lizenz, Cargo-Gerüst und CI.
@@ -12,3 +14,6 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Shell mit PTY und Fenstergröße (`Session::open_shell`, `Shell::resize`), Ende per Exit-Status oder Signal, Kanäle `direct-tcpip` und `direct-streamlocal`.
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
+
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/staude/amiscara-ssh/releases/tag/v0.1.0
