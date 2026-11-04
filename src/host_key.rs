@@ -78,12 +78,37 @@ fn recorded_keys(
     if path.exists() {
         std::fs::File::open(path)?;
     }
-    known_hosts::known_host_keys_path(host, port, path).map_err(|err| {
+    // russh finds hashed entries and plain ones written exactly like this.
+    let mut keys = known_hosts::known_host_keys_path(host, port, path).map_err(|err| {
         SshError::Io(std::io::Error::other(format!(
             "known_hosts {}: {err}",
             path.display()
         )))
-    })
+    })?;
+    // Plain entries in another casing (by hand or by older tools) count
+    // too, or TOFU would learn a second key next to them.
+    let wanted = if port == 22 {
+        host.to_owned()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    if let Ok(text) = std::fs::read_to_string(path) {
+        for (index, line) in text.lines().enumerate() {
+            let mut fields = line.split_whitespace();
+            let (Some(names), Some(kind), Some(blob)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let named = names
+                .split(',')
+                .any(|name| name != wanted && name.eq_ignore_ascii_case(&wanted));
+            if named && let Ok(key) = PublicKey::from_openssh(&format!("{kind} {blob}")) {
+                keys.push((index + 1, key));
+            }
+        }
+    }
+    Ok(keys)
 }
 
 fn learn(path: &std::path::Path, host: &str, port: u16, key: &PublicKey) -> Result<(), SshError> {
@@ -401,6 +426,28 @@ mod tests {
         let (check, _) = HostKeyCheck::new("h", 22, tofu);
         assert!(!check.check(&key)?);
         assert!(matches!(refusal(&check.refusal), Some(SshError::Io(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn entry_in_other_casing_blocks_tofu() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("known_hosts");
+        let (key, line) = server_key()?;
+        std::fs::write(&path, format!("[Server.Example]:2222 {line}\n"))?;
+        let tofu = HostKeyPolicy::KnownHostsFile {
+            path: path.clone(),
+            accept_new: true,
+        };
+        let (check, _) = HostKeyCheck::new("server.example", 2222, tofu);
+        assert!(check.check(&key)?);
+        let (other, _) = server_key()?;
+        assert!(!check.check(&other)?);
+        assert!(matches!(
+            refusal(&check.refusal),
+            Some(SshError::HostKeyChanged { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(&path)?.lines().count(), 1);
         Ok(())
     }
 }
