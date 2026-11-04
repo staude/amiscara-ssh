@@ -18,10 +18,13 @@ keys="$root/target/ssh-testserver"
 case "${1:-}" in
   start)
     # Keep a running container only if it fits: same port, key still there
-    # (`cargo clean` removes it). Otherwise start afresh.
+    # (`cargo clean` removes it) and installed. Otherwise start afresh.
+    # The container name is global, the key belongs to this checkout.
     if [ -n "$(docker ps -q --filter "name=^/${name}$")" ] \
-      && [ -f "$keys/id_ed25519" ] \
-      && docker port "$name" 22/tcp | grep -qx "127.0.0.1:${port}"; then
+      && [ -f "$keys/id_ed25519.pub" ] \
+      && grep -qx "127.0.0.1:${port}" <<<"$(docker port "$name" 22/tcp)" \
+      && grep -qxF "AUTHORIZED_KEY=$(cat "$keys/id_ed25519.pub")" \
+        <<<"$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name")"; then
       echo "$name läuft schon auf 127.0.0.1:${port}."
       exit 0
     fi
