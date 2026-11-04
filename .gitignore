@@ -1,0 +1,6 @@
+target/
+.DS_Store
+.claude/settings.local.json
+CLAUDE.local.md
+.worktrees/
+.cargo/config.toml
