@@ -21,6 +21,8 @@ pub enum ShellEvent {
     Output(Vec<u8>),
     /// The shell ended with this exit status.
     Exit(u32),
+    /// The shell was ended by this signal (e.g. `KILL`).
+    Signal(String),
 }
 
 /// A running shell. [`Shell::split`] separates reading and writing, so one
@@ -89,6 +91,10 @@ fn event(msg: ChannelMsg) -> Option<ShellEvent> {
             Some(ShellEvent::Output(data.to_vec()))
         }
         ChannelMsg::ExitStatus { exit_status } => Some(ShellEvent::Exit(exit_status)),
+        ChannelMsg::ExitSignal { signal_name, .. } => Some(ShellEvent::Signal(match signal_name {
+            russh::Sig::Custom(name) => name,
+            known => format!("{known:?}"),
+        })),
         _ => None,
     }
 }

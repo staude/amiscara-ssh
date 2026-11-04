@@ -26,7 +26,8 @@ pub enum Identity {
     Agent,
     /// A key held in memory, for example loaded from the Keychain.
     Key(Arc<PrivateKey>),
-    /// A password.
+    /// A password. russh copies it into a plain `String` while signing in;
+    /// only this copy here is wiped on drop.
     Password(Zeroizing<String>),
 }
 

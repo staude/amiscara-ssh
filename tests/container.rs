@@ -163,6 +163,7 @@ async fn wait_for_size(shell: &mut Shell, rows: u16, cols: u16) -> TestResult {
             match event {
                 ShellEvent::Output(bytes) => output.extend_from_slice(&bytes),
                 ShellEvent::Exit(status) => return Err(format!("shell exited with {status}")),
+                ShellEvent::Signal(signal) => return Err(format!("shell ended by {signal}")),
             }
             let text = String::from_utf8_lossy(&output);
             if text.lines().any(|line| line.trim() == wanted) {
@@ -213,6 +214,29 @@ async fn shell_has_pty_size_and_follows_resize() -> TestResult {
     })
     .await?;
     assert_eq!(exit, Some(3));
+    session.disconnect().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn shell_killed_by_signal_reports_it() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let session = Session::connect(&target(key_identity(), tofu(&dir))).await?;
+    let mut shell = session
+        .open_shell("xterm-256color", PtySize { cols: 80, rows: 24 })
+        .await?;
+    shell.write(b"kill -9 $$\n").await?;
+    let signal = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = shell.next().await {
+            if let ShellEvent::Signal(signal) = event {
+                return Some(signal);
+            }
+        }
+        None
+    })
+    .await?;
+    assert_eq!(signal.as_deref(), Some("KILL"));
     session.disconnect().await?;
     Ok(())
 }
