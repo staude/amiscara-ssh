@@ -25,8 +25,12 @@ pub enum HostKeyPolicy {
 /// Records `key` (an OpenSSH public key line, as in
 /// [`SshError::UnknownHostKey`]) for `host:port` in a `known_hosts` file,
 /// for example after the user confirmed the fingerprint. The next
-/// connection with [`HostKeyPolicy::KnownHostsFile`] then trusts exactly
-/// this key, without `accept_new`.
+/// connection with [`HostKeyPolicy::KnownHostsFile`] then trusts this key,
+/// without `accept_new`.
+///
+/// Only for unknown keys: if the file already holds another key of the same
+/// type for the host, this ends in [`SshError::HostKeyChanged`] and writes
+/// nothing, since the old key would stay trusted next to the new one.
 pub fn trust_host_key(
     path: &std::path::Path,
     host: &str,
@@ -34,7 +38,52 @@ pub fn trust_host_key(
     key: &str,
 ) -> Result<(), SshError> {
     let key = crate::keys::parse_public(key)?;
-    learn(path, host, port, &key)
+    let host = host_entry(host)?;
+    let recorded = recorded_keys(path, &host, port)?;
+    if recorded.iter().any(|(_, k)| k.key_data() == key.key_data()) {
+        return Ok(());
+    }
+    if recorded
+        .iter()
+        .any(|(_, k)| k.algorithm() == key.algorithm())
+    {
+        return Err(SshError::HostKeyChanged {
+            host,
+            key: key.to_openssh().unwrap_or_default(),
+            fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+        });
+    }
+    learn(path, &host, port, &key)
+}
+
+/// The host as `known_hosts` stores it: lower case, as OpenSSH writes it.
+/// Characters that would split or widen the entry are refused.
+fn host_entry(host: &str) -> Result<String, SshError> {
+    let refused = |c: char| c.is_whitespace() || c.is_control() || ",*?!|#@".contains(c);
+    if host.is_empty() || host.chars().any(refused) {
+        return Err(SshError::Key(format!(
+            "invalid host for known_hosts: {host:?}"
+        )));
+    }
+    Ok(host.to_ascii_lowercase())
+}
+
+/// Keys recorded for `host:port`. A missing file holds none; a file that
+/// exists but cannot be read is an error, not an empty list.
+fn recorded_keys(
+    path: &std::path::Path,
+    host: &str,
+    port: u16,
+) -> Result<Vec<(usize, PublicKey)>, SshError> {
+    if path.exists() {
+        std::fs::File::open(path)?;
+    }
+    known_hosts::known_host_keys_path(host, port, path).map_err(|err| {
+        SshError::Io(std::io::Error::other(format!(
+            "known_hosts {}: {err}",
+            path.display()
+        )))
+    })
 }
 
 fn learn(path: &std::path::Path, host: &str, port: u16, key: &PublicKey) -> Result<(), SshError> {
@@ -109,17 +158,15 @@ impl HostKeyCheck {
                 _ => self.refuse(changed()),
             },
             HostKeyPolicy::KnownHostsFile { path, accept_new } => {
-                let recorded = match known_hosts::known_host_keys_path(&self.host, self.port, path)
-                {
+                // An unreadable file or a bad host is no decision for the
+                // user; report it instead of asking again and again.
+                let host = match host_entry(&self.host) {
+                    Ok(host) => host,
+                    Err(err) => return self.refuse(err),
+                };
+                let recorded = match recorded_keys(path, &host, self.port) {
                     Ok(recorded) => recorded,
-                    // An unreadable file is no decision for the user; report
-                    // it instead of asking again and again.
-                    Err(err) => {
-                        return self.refuse(SshError::Io(std::io::Error::other(format!(
-                            "known_hosts {}: {err}",
-                            path.display()
-                        ))));
-                    }
+                    Err(err) => return self.refuse(err),
                 };
                 if recorded
                     .iter()
@@ -137,9 +184,10 @@ impl HostKeyCheck {
                 // another key type now showing a new type could be someone
                 // in the middle, so the user decides.
                 if *accept_new && recorded.is_empty() {
-                    learn(path, &self.host, self.port, &server_public_key)
-                        .map_err(|e| russh::Error::IO(std::io::Error::other(e.to_string())))?;
-                    return Ok(true);
+                    return match learn(path, &host, self.port, &server_public_key) {
+                        Ok(()) => Ok(true),
+                        Err(err) => self.refuse(err),
+                    };
                 }
                 self.refuse(unknown())
             }
@@ -281,6 +329,78 @@ mod tests {
         trust_host_key(&path, "h", 2222, &line)?;
         let (check, _) = HostKeyCheck::new("h", 2222, tofu);
         assert!(check.check(&key)?);
+        Ok(())
+    }
+
+    #[test]
+    fn trust_refuses_a_second_key_of_the_same_type() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("known_hosts");
+        let (_, first) = server_key()?;
+        let (_, second) = server_key()?;
+        trust_host_key(&path, "Host.Example", 22, &first)?;
+        trust_host_key(&path, "host.example", 22, &first)?;
+        let written = std::fs::read_to_string(&path)?;
+        assert_eq!(written.matches("host.example ssh-ed25519 ").count(), 1);
+        assert!(matches!(
+            trust_host_key(&path, "host.example", 22, &second),
+            Err(SshError::HostKeyChanged { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(&path)?, written);
+        Ok(())
+    }
+
+    #[test]
+    fn host_names_are_lower_case_and_plain() {
+        assert!(matches!(
+            host_entry("Server.Example").as_deref(),
+            Ok("server.example")
+        ));
+        for bad in ["", "a,b", "a b", "a\nb", "*.example"] {
+            assert!(host_entry(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn upper_case_host_matches_recorded_entry() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("known_hosts");
+        let (key, line) = server_key()?;
+        trust_host_key(&path, "server.example", 22, &line)?;
+        let (other, _) = server_key()?;
+        let tofu = HostKeyPolicy::KnownHostsFile {
+            path: path.clone(),
+            accept_new: true,
+        };
+        let (check, _) = HostKeyCheck::new("Server.Example", 22, tofu);
+        assert!(check.check(&key)?);
+        assert!(!check.check(&other)?);
+        assert!(matches!(
+            refusal(&check.refusal),
+            Some(SshError::HostKeyChanged { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_is_an_error_not_unknown() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, "")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200))?;
+        if std::fs::File::open(&path).is_ok() {
+            return Ok(()); // running as root, permissions do not apply
+        }
+        let (key, _) = server_key()?;
+        let tofu = HostKeyPolicy::KnownHostsFile {
+            path: path.clone(),
+            accept_new: true,
+        };
+        let (check, _) = HostKeyCheck::new("h", 22, tofu);
+        assert!(!check.check(&key)?);
+        assert!(matches!(refusal(&check.refusal), Some(SshError::Io(_))));
         Ok(())
     }
 }
