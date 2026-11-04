@@ -19,7 +19,7 @@ mod shell;
 
 pub use client::{Identity, Session, SshTarget};
 pub use error::SshError;
-pub use host_key::HostKeyPolicy;
+pub use host_key::{HostKeyPolicy, trust_host_key};
 pub use shell::{PtySize, Shell, ShellEvent, ShellReader, ShellWriter};
 
 pub use russh::client::Msg;
