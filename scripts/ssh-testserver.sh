@@ -17,11 +17,14 @@ keys="$root/target/ssh-testserver"
 
 case "${1:-}" in
   start)
-    if [ -n "$(docker ps -q --filter "name=^/${name}$")" ]; then
-      echo "$name läuft schon."
+    # Keep a running container only if it fits: same port, key still there
+    # (`cargo clean` removes it). Otherwise start afresh.
+    if [ -n "$(docker ps -q --filter "name=^/${name}$")" ] \
+      && [ -f "$keys/id_ed25519" ] \
+      && docker port "$name" 22/tcp | grep -qx "127.0.0.1:${port}"; then
+      echo "$name läuft schon auf 127.0.0.1:${port}."
       exit 0
     fi
-    # A stopped leftover would block the name.
     docker rm -f "$name" >/dev/null 2>&1 || true
     mkdir -p "$keys"
     if [ ! -f "$keys/id_ed25519" ]; then
@@ -31,7 +34,7 @@ case "${1:-}" in
     docker run -d --name "$name" -p "127.0.0.1:${port}:22" \
       -e "AUTHORIZED_KEY=$(cat "$keys/id_ed25519.pub")" "$image" >/dev/null
     for _ in $(seq 1 50); do
-      if docker logs "$name" 2>&1 | grep -q 'Server listening'; then
+      if grep -q 'Server listening' <<<"$(docker logs "$name" 2>&1)"; then
         echo "$name läuft auf 127.0.0.1:${port}."
         exit 0
       fi
