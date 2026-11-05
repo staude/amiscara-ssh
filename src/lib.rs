@@ -8,15 +8,26 @@
 //! `direct-streamlocal` channels reach ports and sockets on the server.
 //! [`keys`] generates, reads and describes client keys.
 //!
+//! Jump hosts: [`Session::connect_via`] reaches a server through a
+//! `direct-tcpip` channel on another session, without a local port. A
+//! [`Route`] chains any number of jumps; a [`SessionPool`] sets it up hop by
+//! hop, keeps one connection per jump for every session behind it, closes it
+//! when the last [`Lease`] is gone and reports each hop as a [`HopEvent`]
+//! (connecting, connected with latency, reused, failed with a
+//! [`HopFailure`], closed). Agent forwarding is off unless the target turns
+//! it on with [`SshTarget::agent_forward`], and never reaches a jump.
+//!
 //! The crate started as the general SSH part of `herdr-transport` in
 //! Amiscara Agents; everything specific to an app stays in the app.
 
+mod chain;
 mod client;
 mod error;
 mod host_key;
 pub mod keys;
 mod shell;
 
+pub use chain::{HopEvent, HopFailure, HopState, Lease, PoolConfig, Route, SessionPool};
 pub use client::{Identity, Session, SshTarget};
 pub use error::SshError;
 pub use host_key::{HostKeyPolicy, trust_host_key};

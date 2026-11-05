@@ -39,9 +39,17 @@ pub struct ShellWriter {
 
 impl Session {
     /// Opens a shell with a PTY of type `term` (e.g. `xterm-256color`).
+    ///
+    /// With [`crate::SshTarget::agent_forward`] the shell gets the local SSH
+    /// agent; a server that refuses ends in
+    /// `SshError::Refused("agent forwarding")`.
     pub async fn open_shell(&self, term: &str, size: PtySize) -> Result<Shell, SshError> {
         let mut channel = self.channel_session().await?;
         let mut pending = VecDeque::new();
+        if self.agent_forward() {
+            channel.agent_forward(true).await?;
+            wait_for_reply(&mut channel, "agent forwarding", &mut pending).await?;
+        }
         channel
             .request_pty(
                 true,

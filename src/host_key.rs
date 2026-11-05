@@ -4,8 +4,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use russh::client;
+use russh::client::{self, ChannelOpenHandle, Msg};
 use russh::keys::{HashAlg, PublicKey, PublicKeyOrCertificate, known_hosts};
+use russh::{Channel, ChannelOpenFailure};
 
 use crate::SshError;
 
@@ -118,11 +119,13 @@ fn learn(path: &std::path::Path, host: &str, port: u16, key: &PublicKey) -> Resu
 
 /// The russh handler of a connection: checks the server key against the
 /// policy and keeps the reason of a refusal for [`crate::Session::connect`].
+/// It also answers agent channels of the server.
 pub(crate) struct HostKeyCheck {
     host: String,
     port: u16,
     policy: HostKeyPolicy,
     refusal: Arc<Mutex<Option<SshError>>>,
+    agent_forward: bool,
 }
 
 impl HostKeyCheck {
@@ -137,8 +140,16 @@ impl HostKeyCheck {
             port,
             policy,
             refusal: Arc::clone(&refusal),
+            agent_forward: false,
         };
         (check, refusal)
+    }
+
+    /// Accept agent channels of the server and connect them to the local
+    /// agent. Without it every agent channel is refused.
+    pub(crate) fn with_agent_forward(mut self, agent_forward: bool) -> Self {
+        self.agent_forward = agent_forward;
+        self
     }
 
     fn refuse(&self, error: SshError) -> Result<bool, russh::Error> {
@@ -229,6 +240,50 @@ impl client::Handler for HostKeyCheck {
     ) -> Result<bool, Self::Error> {
         self.check(server_key)
     }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        // russh accepts by default; without consent the server gets nothing.
+        if !self.agent_forward {
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        }
+        match local_agent().await {
+            Ok(mut agent) => {
+                reply.accept().await;
+                tokio::spawn(async move {
+                    let mut stream = channel.into_stream();
+                    // Ends when either side closes; nothing to report.
+                    tokio::io::copy_bidirectional(&mut stream, &mut agent)
+                        .await
+                        .ok();
+                });
+            }
+            Err(_) => reply.reject(ChannelOpenFailure::ConnectFailed).await,
+        }
+        Ok(())
+    }
+}
+
+/// The local SSH agent: `SSH_AUTH_SOCK` on Unix.
+#[cfg(unix)]
+async fn local_agent() -> std::io::Result<tokio::net::UnixStream> {
+    let path = std::env::var_os("SSH_AUTH_SOCK").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "SSH_AUTH_SOCK is not set")
+    })?;
+    tokio::net::UnixStream::connect(path).await
+}
+
+/// The local SSH agent: the named pipe of Windows OpenSSH.
+#[cfg(windows)]
+async fn local_agent() -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    tokio::net::windows::named_pipe::ClientOptions::new().open(r"\\.\pipe\openssh-ssh-agent")
 }
 
 #[cfg(test)]
