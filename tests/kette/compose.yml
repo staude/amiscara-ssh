@@ -1,0 +1,39 @@
+# Test chain of amiscara-ssh: client -> bastion -> jump -> target.
+# Only the bastion is reachable from outside, and only on 127.0.0.1; jump and
+# target sit in internal networks. Started by scripts/ssh-testkette.sh.
+name: amiscara-ssh-chain
+
+x-hop: &hop
+  build: .
+  image: amiscara-ssh-chain-hop
+  volumes:
+    - ../../target/ssh-testkette:/state:ro
+
+services:
+  bastion:
+    <<: *hop
+    hostname: bastion
+    environment:
+      ROLE: bastion
+    ports:
+      - "127.0.0.1:${AMISCARA_SSH_CHAIN_PORT:-2223}:22"
+    networks: [aussen, mitte]
+  jump:
+    <<: *hop
+    hostname: jump
+    environment:
+      ROLE: jump
+    networks: [mitte, innen]
+  target:
+    <<: *hop
+    hostname: target
+    environment:
+      ROLE: target
+    networks: [innen]
+
+networks:
+  aussen: {}
+  mitte:
+    internal: true
+  innen:
+    internal: true
