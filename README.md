@@ -81,6 +81,8 @@ while let Ok(event) = events.try_recv() {
 - `connect_fresh` baut nur zum Ziel eine eigene Verbindung auf, die Sprünge kommen weiter aus dem Pool.
 - Scheitert ein Sprung, liefert `connect` `SshError::Hop` mit Index und `user@host:port`, das Ereignis `HopState::Failed` nennt die Fehlerart (`HopFailure`).
 - `agent_forward: true` am Ziel gibt Shells dort den lokalen SSH-Agent. Sprünge bekommen ihn nie, auch wenn ihr `SshTarget` es verlangt.
+- Eine `Lease` gibt man durch Fallenlassen zurück, nicht mit `disconnect()`: das schlösse die geteilte Verbindung für alle. Auch ein abgebrochenes `connect` hinterlässt nichts im Pool.
+- Der Pool-Schlüssel ist der Weg aus Host, Port und Benutzer je Sprung (beim Ziel auch `agent_forward`). Zugangsdaten und Host-Key-Regel gehören nicht dazu: Eine lebende Verbindung wird so weiterbenutzt, wie sie angemeldet und geprüft wurde.
 
 ## Release
 
