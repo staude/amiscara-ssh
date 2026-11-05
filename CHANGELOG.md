@@ -4,6 +4,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-05
+
 ### Added
 
 - Jump-Host-Ketten: `Session::connect_via` öffnet eine Verbindung über einen `direct-tcpip`-Kanal einer anderen Sitzung, ohne lokalen Port. `Route` beschreibt beliebig viele Sprünge, jeder mit eigenem Benutzer, eigenen Zugangsdaten und eigenem Host-Key (staude/amiscara-connect#25).
@@ -27,5 +29,6 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/staude/amiscara-ssh/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/staude/amiscara-ssh/releases/tag/v0.1.0
