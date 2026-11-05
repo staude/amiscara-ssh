@@ -1,5 +1,5 @@
 //! Host key checks: an OpenSSH `known_hosts` file with trust on first use,
-//! or one pinned key.
+//! one pinned key, or a [`HostKeyVerifier`] of the app.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -21,6 +21,30 @@ pub enum HostKeyPolicy {
     /// Exactly this key, as an OpenSSH public key line. `None` trusts
     /// nothing yet, so the first contact ends in [`SshError::UnknownHostKey`].
     Pinned(Option<String>),
+    /// The app decides during the handshake, for example against keys it
+    /// keeps in its own document. [`HostKeyVerdict::Unknown`] ends in
+    /// [`SshError::UnknownHostKey`], [`HostKeyVerdict::Changed`] in
+    /// [`SshError::HostKeyChanged`]. Host certificates are refused before the
+    /// verifier is asked.
+    Verifier(Arc<dyn HostKeyVerifier>),
+}
+
+/// What a [`HostKeyVerifier`] makes of the key a server presents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostKeyVerdict {
+    /// The key is trusted; the connection goes on.
+    Trusted,
+    /// Nobody has trusted a key for this host yet.
+    Unknown,
+    /// The key differs from the trusted one.
+    Changed,
+}
+
+/// Checks a host key with the app's own rules, see
+/// [`HostKeyPolicy::Verifier`]. Called once per connection, with the host
+/// and port of the [`crate::SshTarget`] and the key the server presented.
+pub trait HostKeyVerifier: Send + Sync + std::fmt::Debug {
+    fn verify(&self, host: &str, port: u16, key: &PublicKey) -> HostKeyVerdict;
 }
 
 /// Records `key` (an OpenSSH public key line, as in
@@ -193,6 +217,13 @@ impl HostKeyCheck {
                 Ok(pinned) if pinned.key_data() == server_public_key.key_data() => Ok(true),
                 _ => self.refuse(changed()),
             },
+            HostKeyPolicy::Verifier(verifier) => {
+                match verifier.verify(&self.host, self.port, &server_public_key) {
+                    HostKeyVerdict::Trusted => Ok(true),
+                    HostKeyVerdict::Unknown => self.refuse(unknown()),
+                    HostKeyVerdict::Changed => self.refuse(changed()),
+                }
+            }
             HostKeyPolicy::KnownHostsFile { path, accept_new } => {
                 // An unreadable file or a bad host is no decision for the
                 // user; report it instead of asking again and again.
@@ -427,6 +458,91 @@ mod tests {
             Err(SshError::HostKeyChanged { .. })
         ));
         assert_eq!(std::fs::read_to_string(&path)?, written);
+        Ok(())
+    }
+
+    /// Answers with a fixed verdict and remembers what it was asked.
+    #[derive(Debug)]
+    struct Fixed {
+        verdict: HostKeyVerdict,
+        asked: Mutex<Vec<(String, u16, String)>>,
+    }
+
+    impl HostKeyVerifier for Fixed {
+        fn verify(&self, host: &str, port: u16, key: &PublicKey) -> HostKeyVerdict {
+            if let Ok(mut asked) = self.asked.lock() {
+                asked.push((
+                    host.to_owned(),
+                    port,
+                    key.fingerprint(HashAlg::Sha256).to_string(),
+                ));
+            }
+            self.verdict
+        }
+    }
+
+    fn verifier(verdict: HostKeyVerdict) -> Arc<Fixed> {
+        Arc::new(Fixed {
+            verdict,
+            asked: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[test]
+    fn verifier_trusted_accepts_and_sees_host_port_and_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (key, _) = server_key()?;
+        let fixed = verifier(HostKeyVerdict::Trusted);
+        let (check, _) = HostKeyCheck::new("h", 2222, HostKeyPolicy::Verifier(fixed.clone()));
+        assert!(check.check(&key)?);
+        assert!(refusal(&check.refusal).is_none());
+        let asked = fixed.asked.lock().map(|a| a.clone()).unwrap_or_default();
+        assert_eq!(asked.len(), 1);
+        assert_eq!((asked[0].0.as_str(), asked[0].1), ("h", 2222));
+        assert_eq!(
+            asked[0].2,
+            key.public_key().fingerprint(HashAlg::Sha256).to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verifier_unknown_refuses_with_the_presented_key() -> Result<(), Box<dyn std::error::Error>> {
+        let (key, line) = server_key()?;
+        let (check, _) = HostKeyCheck::new(
+            "h",
+            22,
+            HostKeyPolicy::Verifier(verifier(HostKeyVerdict::Unknown)),
+        );
+        assert!(!check.check(&key)?);
+        match refusal(&check.refusal) {
+            Some(SshError::UnknownHostKey {
+                host,
+                key,
+                fingerprint,
+            }) => {
+                assert_eq!(host, "h");
+                assert!(line.starts_with(&key));
+                assert!(fingerprint.starts_with("SHA256:"));
+            }
+            other => panic!("expected UnknownHostKey, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verifier_changed_refuses_as_changed() -> Result<(), Box<dyn std::error::Error>> {
+        let (key, _) = server_key()?;
+        let (check, _) = HostKeyCheck::new(
+            "h",
+            22,
+            HostKeyPolicy::Verifier(verifier(HostKeyVerdict::Changed)),
+        );
+        assert!(!check.check(&key)?);
+        assert!(matches!(
+            refusal(&check.refusal),
+            Some(SshError::HostKeyChanged { .. })
+        ));
         Ok(())
     }
 

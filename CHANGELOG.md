@@ -13,6 +13,12 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 - `SshError` hat die neue Variante `SftpUnavailable`; wer vollständig darauf matcht, ergänzt sie.
 
+## [0.3.0] - 2026-11-05
+
+### Added
+
+- Host-Key-Prüfung durch die App: `HostKeyPolicy::Verifier` mit dem Trait `HostKeyVerifier` entscheidet während des Handshakes über `HostKeyVerdict` (`Trusted`, `Unknown`, `Changed`); abgelehnt wird mit `SshError::UnknownHostKey` bzw. `SshError::HostKeyChanged`. So prüft Connect jeden Sprung gegen die Keys im eigenen Dokument und lernt bei TOFU im selben Aufbau (staude/amiscara-connect#27).
+
 ## [0.2.0] - 2026-11-05
 
 ### Added
@@ -38,6 +44,7 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/staude/amiscara-ssh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/staude/amiscara-ssh/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/staude/amiscara-ssh/releases/tag/v0.1.0

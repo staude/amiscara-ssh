@@ -9,7 +9,7 @@ Ins Crate gehört alles, was nur SSH ist: Verbindungsaufbau und Anmeldung, Host-
 Die Apps binden das Crate als Git-Abhängigkeit mit festem Tag ein:
 
 ```toml
-amiscara-ssh = { git = "https://github.com/staude/amiscara-ssh", tag = "v0.3.0" }
+amiscara-ssh = { git = "https://github.com/staude/amiscara-ssh", tag = "v0.4.0" }
 ```
 
 Wer Crate und App zugleich ändert, setzt in der App lokal eine nicht eingecheckte `.cargo/config.toml`:
