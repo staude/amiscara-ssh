@@ -427,3 +427,34 @@ async fn cancelled_connect_leaves_nothing_open() -> TestResult {
     wait_closed(&mut events, &[0], Duration::from_secs(10)).await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn agent_channel_is_refused_when_off() -> TestResult {
+    use amiscara_ssh::ChannelMsg;
+    let pool = SessionPool::new(PoolConfig::default());
+    let off = pool.connect(&chain()).await?;
+    assert!(!off.agent_forward());
+    // Ask for forwarding behind the back of the session: the server then
+    // opens agent channels, and the client must refuse them.
+    let mut channel = off.channel_session().await?;
+    channel.agent_forward(true).await?;
+    channel.request_shell(true).await?;
+    channel
+        .data(&b"ssh-add -l >/dev/null 2>&1; echo \"agent=$?\"; exit\n"[..])
+        .await?;
+    let mut output = Vec::new();
+    let read = async {
+        while let Some(msg) = channel.wait().await {
+            if let ChannelMsg::Data { data } = msg {
+                output.extend_from_slice(&data);
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), read).await?;
+    let text = String::from_utf8_lossy(&output);
+    // sshd's socket is there, but the refused channel yields no keys (1);
+    // an accepted one would list the key in the local agent (0).
+    assert!(text.lines().any(|line| line.trim() == "agent=1"), "{text}");
+    Ok(())
+}

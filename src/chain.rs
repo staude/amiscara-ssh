@@ -471,11 +471,11 @@ impl SessionPool {
         for (index, hop) in hops.iter().enumerate() {
             key.push(HopKey::of(hop));
             let pooled = !(fresh && index == last);
+            // Only one lock at a time: a route through the same bastion does
+            // not wait while this one signs in further down.
+            locked.guards.clear();
             if pooled {
                 // The lock of this hop keeps two calls from building it twice.
-                // Only one lock at a time: a route through the same bastion
-                // does not wait while this one signs in further down.
-                locked.guards.clear();
                 locked.guards.push(shared.lock(&key).await);
                 locked.keys.push(key.clone());
                 let reused = shared.entries().reuse(&key, hold.slot.as_ref());
@@ -510,6 +510,10 @@ impl SessionPool {
             let session = Arc::new(session);
             shared.emit(&labels, index, HopState::Connected { latency });
             reporter.arm();
+            if session.is_closed() {
+                // Ended before the reporter was armed; report it now.
+                reporter.closed();
+            }
             if !pooled {
                 // Fresh target: keeps the use of the last jump until it ends.
                 return Ok(Lease {
