@@ -2,14 +2,14 @@
 
 Gemeinsamer SSH-Client der Amiscara-Apps ([Amiscara Connect](https://github.com/staude/amiscara-connect) und [Amiscara Agents](https://github.com/staude/amiscara-agents)), gebaut auf [russh](https://github.com/Eugeny/russh).
 
-Ins Crate gehört alles, was nur SSH ist: Verbindungsaufbau und Anmeldung, Host-Key-Prüfung mit TOFU, Schlüssel, Kanäle für Shell mit PTY, `direct-tcpip` und `direct-streamlocal`, Jump-Host-Ketten mit Sitzungs-Pool und Agent-Forwarding. SFTP folgt. Was zu einer App gehört, bleibt in der App.
+Ins Crate gehört alles, was nur SSH ist: Verbindungsaufbau und Anmeldung, Host-Key-Prüfung mit TOFU, Schlüssel, Kanäle für Shell mit PTY, `direct-tcpip` und `direct-streamlocal`, Jump-Host-Ketten mit Sitzungs-Pool und Agent-Forwarding, SFTP über `Session::open_sftp`. Was zu einer App gehört, bleibt in der App.
 
 ## Einbinden
 
 Die Apps binden das Crate als Git-Abhängigkeit mit festem Tag ein:
 
 ```toml
-amiscara-ssh = { git = "https://github.com/staude/amiscara-ssh", tag = "v0.2.0" }
+amiscara-ssh = { git = "https://github.com/staude/amiscara-ssh", tag = "v0.3.0" }
 ```
 
 Wer Crate und App zugleich ändert, setzt in der App lokal eine nicht eingecheckte `.cargo/config.toml`:
@@ -83,6 +83,20 @@ while let Ok(event) = events.try_recv() {
 - `agent_forward: true` am Ziel gibt Shells dort den lokalen SSH-Agent. Sprünge bekommen ihn nie, auch wenn ihr `SshTarget` es verlangt.
 - Eine `Lease` gibt man durch Fallenlassen zurück, nicht mit `disconnect()`: das schlösse die geteilte Verbindung für alle. Auch ein abgebrochenes `connect` hinterlässt nichts im Pool.
 - Der Pool-Schlüssel ist der Weg aus Host, Port und Benutzer je Sprung (beim Ziel auch `agent_forward`). Zugangsdaten und Host-Key-Regel gehören nicht dazu: Eine lebende Verbindung wird so weiterbenutzt, wie sie angemeldet und geprüft wurde.
+
+## SFTP
+
+`Session::open_sftp` startet das Subsystem `sftp` auf einem neuen Kanal, auch auf einer `Lease` hinter Jump Hosts, und gibt eine `russh_sftp::client::SftpSession` zurück. Das Crate exportiert `russh_sftp` mit, damit die Apps dieselbe Version nutzen.
+
+```rust
+let sftp = session.open_sftp().await?;
+for entry in sftp.read_dir(".").await? {
+    println!("{}", entry.file_name());
+}
+```
+
+- Die SFTP-Sitzung hält die Verbindung nicht selbst: Die `Session` bzw. `Lease` muss leben, solange sie benutzt wird.
+- Ein Server ohne SFTP endet in `SshError::SftpUnavailable`.
 
 ## Release
 

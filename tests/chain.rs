@@ -212,6 +212,27 @@ async fn shell_on_target_over_two_jumps() -> TestResult {
 
 #[tokio::test]
 #[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn sftp_on_target_over_two_jumps() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let lease = pool.connect(&chain()).await?;
+    let sftp = lease.open_sftp().await?;
+    assert_eq!(sftp.canonicalize(".").await?, "/home/target-user");
+    // A fresh account: no entries besides the hidden ones of adduser.
+    let entries: Vec<String> = sftp
+        .read_dir(".")
+        .await?
+        .map(|entry| entry.file_name())
+        .collect();
+    assert!(
+        entries.iter().all(|name| name.starts_with('.')),
+        "{entries:?}"
+    );
+    sftp.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
 async fn second_lease_reuses_every_hop_and_last_drop_closes_all() -> TestResult {
     let pool = SessionPool::new(PoolConfig::default());
     let mut events = pool.subscribe();

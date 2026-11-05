@@ -11,3 +11,4 @@ AllowAgentForwarding yes
 X11Forwarding no
 PrintMotd no
 LogLevel VERBOSE
+Subsystem sftp internal-sftp

@@ -17,6 +17,10 @@
 //! [`HopFailure`], closed). Agent forwarding is off unless the target turns
 //! it on with [`SshTarget::agent_forward`], and never reaches a jump.
 //!
+//! Files: [`Session::open_sftp`] starts the `sftp` subsystem on a session,
+//! also one behind jumps, and returns a [`russh_sftp::client::SftpSession`].
+//! The crate re-exports [`russh_sftp`], so apps use the same version.
+//!
 //! The crate started as the general SSH part of `herdr-transport` in
 //! Amiscara Agents; everything specific to an app stays in the app.
 
@@ -25,6 +29,7 @@ mod client;
 mod error;
 mod host_key;
 pub mod keys;
+mod sftp;
 mod shell;
 
 pub use chain::{HopEvent, HopFailure, HopState, Lease, PoolConfig, Route, SessionPool};
@@ -36,4 +41,5 @@ pub use shell::{PtySize, Shell, ShellEvent, ShellReader, ShellWriter};
 pub use russh::client::Msg;
 pub use russh::keys::{PrivateKey, PublicKey};
 pub use russh::{Channel, ChannelMsg};
+pub use russh_sftp;
 pub use zeroize::Zeroizing;

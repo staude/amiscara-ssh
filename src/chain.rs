@@ -128,9 +128,11 @@ impl From<&SshError> for HopFailure {
                 | russh::Error::KeepaliveTimeout
                 | russh::Error::InactivityTimeout,
             ) => Self::Closed,
-            SshError::Io(_) | SshError::Ssh(_) | SshError::Key(_) | SshError::Refused(_) => {
-                Self::Other
-            }
+            SshError::Io(_)
+            | SshError::Ssh(_)
+            | SshError::Key(_)
+            | SshError::Refused(_)
+            | SshError::SftpUnavailable(_) => Self::Other,
         }
     }
 }
