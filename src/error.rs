@@ -34,11 +34,26 @@ pub enum SshError {
     /// The server refused a channel request, for example a PTY or a shell.
     #[error("server refused {0}")]
     Refused(String),
+    /// Connecting and signing in to this host (`user@host:port`) took too
+    /// long.
+    #[error("timed out connecting to {0}")]
+    Timeout(String),
+    /// A hop of a [`crate::Route`] failed: `index` counts from the first jump
+    /// (0), the target is the last index; `hop` is `user@host:port`.
+    #[error("hop {index} ({hop}): {source}")]
+    Hop {
+        index: usize,
+        hop: String,
+        source: Box<SshError>,
+    },
 }
 
 impl SshError {
     /// Errors that a retry cannot fix without a decision by the user.
     pub fn needs_user(&self) -> bool {
+        if let Self::Hop { source, .. } = self {
+            return source.needs_user();
+        }
         matches!(
             self,
             Self::UnknownHostKey { .. }
@@ -67,5 +82,13 @@ mod tests {
         );
         assert!(!SshError::Refused("pty".into()).needs_user());
         assert!(!SshError::Io(std::io::Error::other("x")).needs_user());
+        assert!(!SshError::Timeout("u@h:22".into()).needs_user());
+        let hop = |source| SshError::Hop {
+            index: 1,
+            hop: "u@jump:22".into(),
+            source: Box::new(source),
+        };
+        assert!(hop(SshError::AuthFailed("u@jump".into())).needs_user());
+        assert!(!hop(SshError::Timeout("u@jump:22".into())).needs_user());
     }
 }

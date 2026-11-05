@@ -1,0 +1,13 @@
+# Every hop of the test chain. Alpine ships AllowTcpForwarding no; a jump
+# needs it for direct-tcpip, the target needs AllowAgentForwarding.
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+AllowTcpForwarding yes
+AllowAgentForwarding yes
+X11Forwarding no
+PrintMotd no
+LogLevel VERBOSE

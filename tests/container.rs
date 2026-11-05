@@ -38,6 +38,7 @@ fn target(identity: Identity, host_key: HostKeyPolicy) -> SshTarget {
         user: USER.into(),
         identity,
         host_key,
+        agent_forward: false,
     }
 }
 

@@ -1,16 +1,21 @@
 //! Connecting, signing in and opening channels.
 
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use russh::client::{self, AuthResult, Handle};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, load_secret_key};
-use russh::{Channel, Disconnect};
+use russh::{Channel, ChannelStream, Disconnect};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
 use zeroize::Zeroizing;
 
 use crate::SshError;
+use crate::chain::Reporter;
 use crate::host_key::{HostKeyCheck, HostKeyPolicy};
 
 /// How to sign in.
@@ -54,11 +59,33 @@ pub struct SshTarget {
     pub user: String,
     pub identity: Identity,
     pub host_key: HostKeyPolicy,
+    /// Lets this server use the local SSH agent through shells opened on the
+    /// session. Off by default; in a [`crate::Route`] it only ever applies to
+    /// the target, never to a jump.
+    pub agent_forward: bool,
+}
+
+impl SshTarget {
+    /// `user@host:port`, as errors and hop events name the host.
+    pub fn label(&self) -> String {
+        format!("{}@{}:{}", self.user, self.host, self.port)
+    }
 }
 
 /// One signed-in SSH connection. Channels are opened on it as needed.
 pub struct Session {
     handle: Handle<HostKeyCheck>,
+    agent_forward: bool,
+}
+
+/// Transport settings of a single connection: keepalive every 15 s.
+fn default_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(15)),
+        nodelay: true,
+        ..Default::default()
+    })
 }
 
 impl Session {
@@ -68,22 +95,62 @@ impl Session {
     /// [`SshError::HostKeyChanged`], refused credentials in
     /// [`SshError::AuthFailed`].
     pub async fn connect(target: &SshTarget) -> Result<Self, SshError> {
-        let config = Arc::new(client::Config {
-            inactivity_timeout: None,
-            keepalive_interval: Some(Duration::from_secs(15)),
-            nodelay: true,
-            ..Default::default()
-        });
+        let stream = Self::open_tcp(target).await?;
+        Self::start(target, stream, default_config(), None).await
+    }
+
+    /// Connects to `target` through `jump` (ProxyJump): a `direct-tcpip`
+    /// channel on `jump` carries the new connection, without a local port.
+    /// `target.host` is resolved by the jump, and the host key is checked
+    /// under that name. Errors as with [`Session::connect`].
+    pub async fn connect_via(jump: &Session, target: &SshTarget) -> Result<Self, SshError> {
+        let stream = jump.open_via(target).await?;
+        Self::start(target, stream, default_config(), None).await
+    }
+
+    /// The TCP connection to `target`.
+    pub(crate) async fn open_tcp(target: &SshTarget) -> Result<TcpStream, SshError> {
+        let socket = TcpStream::connect((target.host.as_str(), target.port)).await?;
+        // Only latency suffers if this fails.
+        socket.set_nodelay(true).ok();
+        Ok(socket)
+    }
+
+    /// A `direct-tcpip` channel from this session to `target`, as a stream.
+    pub(crate) async fn open_via(
+        &self,
+        target: &SshTarget,
+    ) -> Result<ChannelStream<client::Msg>, SshError> {
+        Ok(self
+            .direct_tcpip(&target.host, target.port)
+            .await?
+            .into_stream())
+    }
+
+    /// Runs SSH on `stream`: key exchange, host key check, sign-in.
+    pub(crate) async fn start<S>(
+        target: &SshTarget,
+        stream: S,
+        config: Arc<client::Config>,
+        reporter: Option<Reporter>,
+    ) -> Result<Self, SshError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let (check, refusal) =
             HostKeyCheck::new(&target.host, target.port, target.host_key.clone());
-        let mut handle =
-            match client::connect(config, (target.host.as_str(), target.port), check).await {
-                Ok(handle) => handle,
-                Err(err) => {
-                    let refused = refusal.lock().ok().and_then(|mut r| r.take());
-                    return Err(refused.unwrap_or(SshError::Ssh(err)));
-                }
-            };
+        let check = check.with_agent_forward(target.agent_forward);
+        let stream = Watched {
+            inner: stream,
+            reporter,
+        };
+        let mut handle = match client::connect_stream(config, stream, check).await {
+            Ok(handle) => handle,
+            Err(err) => {
+                let refused = refusal.lock().ok().and_then(|mut r| r.take());
+                return Err(refused.unwrap_or(SshError::Ssh(err)));
+            }
+        };
 
         let user = target.user.as_str();
         let authenticated = match &target.identity {
@@ -107,7 +174,15 @@ impl Session {
                 target.user, target.host
             )));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            agent_forward: target.agent_forward,
+        })
+    }
+
+    /// Whether shells on this session forward the local SSH agent.
+    pub fn agent_forward(&self) -> bool {
+        self.agent_forward
     }
 
     /// A plain session channel, for example to run a command.
@@ -144,12 +219,69 @@ impl Session {
         self.handle.is_closed()
     }
 
-    /// Closes the connection.
+    /// Closes the connection. On a [`crate::Lease`] that closes it for every
+    /// user of the pooled connection; drop the lease instead.
     pub async fn disconnect(&self) -> Result<(), SshError> {
         Ok(self
             .handle
             .disconnect(Disconnect::ByApplication, "", "")
             .await?)
+    }
+}
+
+/// The transport of a session. russh drops it whenever the connection ends,
+/// also where it skips `Handler::disconnected` (a failed shutdown of a
+/// channel below), so the drop reports the end.
+struct Watched<S> {
+    inner: S,
+    reporter: Option<Reporter>,
+}
+
+impl<S> Drop for Watched<S> {
+    fn drop(&mut self) {
+        if let Some(reporter) = &self.reporter {
+            reporter.closed();
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Watched<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Watched<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 }
 
@@ -210,6 +342,7 @@ mod tests {
             user: "u".into(),
             identity: password.clone(),
             host_key: HostKeyPolicy::Pinned(None),
+            agent_forward: false,
         };
         for text in [
             format!("{password:?}"),

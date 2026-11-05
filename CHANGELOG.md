@@ -4,6 +4,18 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+### Added
+
+- Jump-Host-Ketten: `Session::connect_via` öffnet eine Verbindung über einen `direct-tcpip`-Kanal einer anderen Sitzung, ohne lokalen Port. `Route` beschreibt beliebig viele Sprünge, jeder mit eigenem Benutzer, eigenen Zugangsdaten und eigenem Host-Key (staude/amiscara-connect#25).
+- `SessionPool` mit einer geteilten Verbindung pro Sprung: Schlüssel ist der Weg bis zum Sprung, gezählt werden `Lease`s und Verbindungen dahinter, die letzte Rückgabe schließt die Verbindung. `connect_fresh` baut nur zum Ziel neu auf. Tote Sprünge werden beim nächsten `connect` ab dort ersetzt, Zeitgrenze und Keepalive je Sprung (`PoolConfig`).
+- Status je Sprung als `HopEvent` (`subscribe`): verbinden, verbunden mit Aufbauzeit, wiederverwendet, fehlgeschlagen mit `HopFailure`, geschlossen. Fehler eines Sprungs als `SshError::Hop` mit Index, neu `SshError::Timeout`.
+- Agent-Forwarding über `SshTarget::agent_forward`, standardmäßig aus; im Pool nur für das Ziel, nie für einen Sprung. Ohne Einschalten lehnt der Client Agent-Kanäle des Servers ab.
+- Testkette aus drei Containern (`scripts/ssh-testkette.sh`) mit eigenem Host-Key je Sprung und Tests in `tests/chain.rs`, in der CI als eigener Job.
+
+### Changed
+
+- `SshTarget` hat das neue Feld `agent_forward`; wer die Struktur selbst aufbaut, ergänzt `agent_forward: false`.
+
 ## [0.1.0] - 2026-11-04
 
 ### Added
