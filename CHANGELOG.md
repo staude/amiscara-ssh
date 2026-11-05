@@ -4,6 +4,12 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-05
+
+### Added
+
+- Host-Key-Prüfung durch die App: `HostKeyPolicy::Verifier` mit dem Trait `HostKeyVerifier` entscheidet während des Handshakes über `HostKeyVerdict` (`Trusted`, `Unknown`, `Changed`); abgelehnt wird mit `SshError::UnknownHostKey` bzw. `SshError::HostKeyChanged`. So prüft Connect jeden Sprung gegen die Keys im eigenen Dokument und lernt bei TOFU im selben Aufbau (staude/amiscara-connect#27).
+
 ## [0.2.0] - 2026-11-05
 
 ### Added
@@ -12,7 +18,6 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - `SessionPool` mit einer geteilten Verbindung pro Sprung: Schlüssel ist der Weg bis zum Sprung, gezählt werden `Lease`s und Verbindungen dahinter, die letzte Rückgabe schließt die Verbindung. `connect_fresh` baut nur zum Ziel neu auf. Tote Sprünge werden beim nächsten `connect` ab dort ersetzt, Zeitgrenze und Keepalive je Sprung (`PoolConfig`).
 - Status je Sprung als `HopEvent` (`subscribe`): verbinden, verbunden mit Aufbauzeit, wiederverwendet, fehlgeschlagen mit `HopFailure`, geschlossen. Fehler eines Sprungs als `SshError::Hop` mit Index, neu `SshError::Timeout`.
 - Agent-Forwarding über `SshTarget::agent_forward`, standardmäßig aus; im Pool nur für das Ziel, nie für einen Sprung. Ohne Einschalten lehnt der Client Agent-Kanäle des Servers ab.
-- Host-Key-Prüfung durch die App: `HostKeyPolicy::Verifier` mit dem Trait `HostKeyVerifier` entscheidet während des Handshakes über `HostKeyVerdict` (`Trusted`, `Unknown`, `Changed`); abgelehnt wird mit `SshError::UnknownHostKey` bzw. `SshError::HostKeyChanged`. So prüft Connect jeden Sprung gegen die Keys im eigenen Dokument und lernt bei TOFU im selben Aufbau (staude/amiscara-connect#27).
 - Testkette aus drei Containern (`scripts/ssh-testkette.sh`) mit eigenem Host-Key je Sprung und Tests in `tests/chain.rs`, in der CI als eigener Job.
 
 ### Changed
@@ -30,6 +35,7 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/staude/amiscara-ssh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/staude/amiscara-ssh/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/staude/amiscara-ssh/releases/tag/v0.1.0
