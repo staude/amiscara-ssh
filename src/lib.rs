@@ -2,7 +2,8 @@
 //!
 //! [`Session::connect`] opens a connection to an [`SshTarget`], checks the
 //! host key against a [`HostKeyPolicy`] (an OpenSSH `known_hosts` file with
-//! trust on first use, or one pinned key) and signs in with an [`Identity`]:
+//! trust on first use, one pinned key, or a [`HostKeyVerifier`] that lets
+//! the app decide during the handshake) and signs in with an [`Identity`]:
 //! key file, SSH agent, key in memory or password. On the session,
 //! [`Session::open_shell`] starts a shell with a PTY, and `direct-tcpip` and
 //! `direct-streamlocal` channels reach ports and sockets on the server.
@@ -30,7 +31,7 @@ mod shell;
 pub use chain::{HopEvent, HopFailure, HopState, Lease, PoolConfig, Route, SessionPool};
 pub use client::{Identity, Session, SshTarget};
 pub use error::SshError;
-pub use host_key::{HostKeyPolicy, trust_host_key};
+pub use host_key::{HostKeyPolicy, HostKeyVerdict, HostKeyVerifier, trust_host_key};
 pub use shell::{PtySize, Shell, ShellEvent, ShellReader, ShellWriter};
 
 pub use russh::client::Msg;
