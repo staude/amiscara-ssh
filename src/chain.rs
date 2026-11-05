@@ -330,7 +330,21 @@ impl Shared {
     }
 }
 
-/// Set-up locks of one route, released and cleaned up on drop.
+/// The use a set-up holds on the deepest hop so far. Given back on drop, so
+/// a cancelled `connect` (dropped future, timeout of the caller) leaves
+/// nothing behind in the pool.
+struct Hold {
+    shared: Arc<Shared>,
+    slot: Option<Slot>,
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.shared.release(self.slot.take());
+    }
+}
+
+/// Set-up lock of the hop being built, released and cleaned up on drop.
 struct Locked {
     shared: Arc<Shared>,
     keys: Vec<Key>,
@@ -375,7 +389,10 @@ fn close_later(sessions: Vec<Arc<Session>>) {
 /// Connections over jump chains, with one shared connection per jump.
 ///
 /// Every hop is keyed by the way up to it (host, port and user of each hop
-/// so far), so the same server behind two jumps is two connections. A
+/// so far, for the target also `agent_forward`), so the same server behind
+/// two jumps is two connections. Credentials and host key policy are not
+/// part of the key: a live connection is reused as it was signed in and
+/// checked, a changed policy only applies to the next new connection. A
 /// connection stays in the pool while a [`Lease`] or a connection behind it
 /// uses it; once the last one is gone, it is closed. Dead connections are
 /// replaced on the next [`SessionPool::connect`], together with everything
@@ -445,23 +462,26 @@ impl SessionPool {
             guards: Vec::new(),
         };
         let mut key: Key = Vec::new();
-        // The use this call holds on the deepest hop so far.
-        let mut hold: Option<Slot> = None;
+        let mut hold = Hold {
+            shared: Arc::clone(shared),
+            slot: None,
+        };
         let mut below: Option<Arc<Session>> = None;
 
         for (index, hop) in hops.iter().enumerate() {
             key.push(HopKey::of(hop));
             let pooled = !(fresh && index == last);
             if pooled {
-                // Holding the locks of all hops before keeps two calls on the
-                // same way from building it twice; ways share locks only on a
-                // common beginning, so they are always taken in the same order.
+                // The lock of this hop keeps two calls from building it twice.
+                // Only one lock at a time: a route through the same bastion
+                // does not wait while this one signs in further down.
+                locked.guards.clear();
                 locked.guards.push(shared.lock(&key).await);
                 locked.keys.push(key.clone());
-                let reused = shared.entries().reuse(&key, hold.as_ref());
+                let reused = shared.entries().reuse(&key, hold.slot.as_ref());
                 if let Some((generation, session)) = reused {
                     shared.emit(&labels, index, HopState::Reused);
-                    shared.release(hold.replace((key.clone(), generation)));
+                    shared.release(hold.slot.replace((key.clone(), generation)));
                     below = Some(session);
                     continue;
                 }
@@ -479,7 +499,7 @@ impl SessionPool {
                 Ok(built) => built,
                 Err((error, failure)) => {
                     shared.emit(&labels, index, HopState::Failed(failure));
-                    shared.release(hold.take());
+                    drop(hold);
                     return Err(SshError::Hop {
                         index,
                         hop: labels[index].clone(),
@@ -494,7 +514,7 @@ impl SessionPool {
                 // Fresh target: keeps the use of the last jump until it ends.
                 return Ok(Lease {
                     session,
-                    hold,
+                    hold: hold.slot.take(),
                     own: true,
                     shared: Arc::clone(shared),
                 });
@@ -503,11 +523,11 @@ impl SessionPool {
             let generation = shared.entries().insert(
                 key.clone(),
                 Arc::clone(&session),
-                hold.clone(),
+                hold.slot.clone(),
                 &mut closing,
             );
             close_later(closing);
-            shared.release(hold.replace((key.clone(), generation)));
+            shared.release(hold.slot.replace((key.clone(), generation)));
             below = Some(session);
         }
         drop(locked);
@@ -515,7 +535,7 @@ impl SessionPool {
         match below {
             Some(session) => Ok(Lease {
                 session,
-                hold,
+                hold: hold.slot.take(),
                 own: false,
                 shared: Arc::clone(shared),
             }),
@@ -569,6 +589,10 @@ impl SessionPool {
 
 /// A session from a [`SessionPool`]. Dropping it gives the connection back;
 /// the pool closes what nobody uses any more.
+///
+/// Close a lease by dropping it, not with [`Session::disconnect`]: that ends
+/// the shared connection for every other lease on it and for everything
+/// behind it.
 pub struct Lease {
     session: Arc<Session>,
     hold: Option<Slot>,

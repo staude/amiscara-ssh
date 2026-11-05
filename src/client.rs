@@ -219,7 +219,8 @@ impl Session {
         self.handle.is_closed()
     }
 
-    /// Closes the connection.
+    /// Closes the connection. On a [`crate::Lease`] that closes it for every
+    /// user of the pooled connection; drop the lease instead.
     pub async fn disconnect(&self) -> Result<(), SshError> {
         Ok(self
             .handle

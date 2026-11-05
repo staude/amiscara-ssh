@@ -400,3 +400,30 @@ async fn killed_jump_closes_behind_it_and_is_rebuilt_from_there() -> TestResult 
     shell_line(&new, "hostname", "target").await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn cancelled_connect_leaves_nothing_open() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let task = tokio::spawn({
+        let pool = pool.clone();
+        async move { pool.connect(&chain()).await.map(drop) }
+    });
+    // Cancel once the bastion is in the pool, while the rest still builds.
+    let bastion_up = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Ok(event) = events.recv().await {
+            if event.index == 0 && connected(&event.state) {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    task.abort();
+    if !matches!(bastion_up, Ok(true)) {
+        return Err("bastion never connected".into());
+    }
+    wait_closed(&mut events, &[0], Duration::from_secs(10)).await?;
+    Ok(())
+}
