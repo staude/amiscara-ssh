@@ -10,6 +10,7 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - `SessionPool` mit einer geteilten Verbindung pro Sprung: Schlüssel ist der Weg bis zum Sprung, gezählt werden `Lease`s und Verbindungen dahinter, die letzte Rückgabe schließt die Verbindung. `connect_fresh` baut nur zum Ziel neu auf. Tote Sprünge werden beim nächsten `connect` ab dort ersetzt, Zeitgrenze und Keepalive je Sprung (`PoolConfig`).
 - Status je Sprung als `HopEvent` (`subscribe`): verbinden, verbunden mit Aufbauzeit, wiederverwendet, fehlgeschlagen mit `HopFailure`, geschlossen. Fehler eines Sprungs als `SshError::Hop` mit Index, neu `SshError::Timeout`.
 - Agent-Forwarding über `SshTarget::agent_forward`, standardmäßig aus; im Pool nur für das Ziel, nie für einen Sprung. Ohne Einschalten lehnt der Client Agent-Kanäle des Servers ab.
+- Host-Key-Prüfung durch die App: `HostKeyPolicy::Verifier` mit dem Trait `HostKeyVerifier` entscheidet während des Handshakes über `HostKeyVerdict` (`Trusted`, `Unknown`, `Changed`); abgelehnt wird mit `SshError::UnknownHostKey` bzw. `SshError::HostKeyChanged`. So prüft Connect jeden Sprung gegen die Keys im eigenen Dokument und lernt bei TOFU im selben Aufbau (staude/amiscara-connect#27).
 - Testkette aus drei Containern (`scripts/ssh-testkette.sh`) mit eigenem Host-Key je Sprung und Tests in `tests/chain.rs`, in der CI als eigener Job.
 
 ### Changed
