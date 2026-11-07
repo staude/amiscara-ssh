@@ -20,8 +20,8 @@ use crate::chain::Reporter;
 use crate::host_key::{HostKeyCheck, HostKeyPolicy};
 use crate::prompt::{KeyboardInteractive, KeyboardPrompt, PromptLine};
 
-/// Sign-in rounds by keyboard-interactive before giving up, as OpenSSH asks
-/// three times.
+/// Refused rounds of keyboard-interactive before giving up, three attempts
+/// as servers usually allow.
 const KEYBOARD_ROUNDS: u32 = 3;
 
 /// How to sign in.
@@ -360,6 +360,11 @@ async fn authenticate_with_agent(
         .request_identities()
         .await
         .map_err(|e| SshError::Key(e.to_string()))?;
+    if identities.is_empty() {
+        // Nothing to offer; `none` still tells which methods are left, for
+        // example keyboard-interactive.
+        return Ok(handle.authenticate_none(user).await?);
+    }
     let hash = handle.best_supported_rsa_hash().await?.flatten();
     let mut last = AuthResult::Failure {
         remaining_methods: russh::MethodSet::empty(),
@@ -391,9 +396,11 @@ struct Asked {
 }
 
 /// Signs in by keyboard-interactive, asking `prompter` for every request
-/// with questions; up to [`KEYBOARD_ROUNDS`] rounds while the server keeps
-/// refusing and offering the method again. `Ok(false)` is a refusal, a
-/// cancelled question ends in [`SshError::Cancelled`].
+/// with questions; up to [`KEYBOARD_ROUNDS`] attempts while the server keeps
+/// refusing and offering the method again. A partial success (one of
+/// several keyboard-interactive steps passed) starts the next step within
+/// the same attempt. `Ok(false)` is a refusal, a cancelled question ends in
+/// [`SshError::Cancelled`].
 async fn authenticate_keyboard_interactive(
     handle: &mut Handle<HostKeyCheck>,
     target: &SshTarget,
@@ -405,7 +412,8 @@ async fn authenticate_keyboard_interactive(
         Some(reporter) => (reporter.route(), reporter.index()),
         None => (vec![target.label()], 0),
     };
-    for attempt in 1..=KEYBOARD_ROUNDS {
+    let mut attempt = 1;
+    while attempt <= KEYBOARD_ROUNDS {
         let mut reply = handle
             .authenticate_keyboard_interactive_start(target.user.as_str(), None)
             .await?;
@@ -413,12 +421,16 @@ async fn authenticate_keyboard_interactive(
             match reply {
                 KeyboardInteractiveAuthResponse::Success => return Ok(true),
                 KeyboardInteractiveAuthResponse::Failure {
-                    remaining_methods, ..
+                    remaining_methods,
+                    partial_success,
                 } => {
-                    if remaining_methods.contains(&MethodKind::KeyboardInteractive) {
-                        break;
+                    if !remaining_methods.contains(&MethodKind::KeyboardInteractive) {
+                        return Ok(false);
                     }
-                    return Ok(false);
+                    if !partial_success {
+                        attempt += 1;
+                    }
+                    break;
                 }
                 KeyboardInteractiveAuthResponse::InfoRequest {
                     name,

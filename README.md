@@ -32,7 +32,7 @@ amiscara-ssh = { path = "../amiscara-ssh" }
   ```
 
   Der Server läuft auf `127.0.0.1:2222` (anderer Port über `AMISCARA_SSH_TEST_PORT`), Nutzer `tester`, Schlüssel in `target/ssh-testserver/`. Tests laufen nie gegen fremde oder produktive Server.
-- Tests gegen die Jump-Host-Kette (braucht Docker): `scripts/ssh-testkette.sh run` startet Bastion, Jump und Ziel als Container, einen eigenen `ssh-agent` mit dem Testschlüssel, führt `cargo test --test chain -- --ignored` aus und baut alles wieder ab, auch bei Fehlern. Nur die Bastion ist erreichbar, auf `127.0.0.1:2223` (anderer Port über `AMISCARA_SSH_CHAIN_PORT`); jeder Sprung hat eigenen Benutzer, eigene Zugangsdaten und eigenen Host-Key, alles in `target/ssh-testkette/`. Daneben läuft `otp-bastion` auf `127.0.0.1:2224` (anderer Port über `AMISCARA_SSH_OTP_PORT`), eine Bastion, die nach dem Schlüssel `id_otp` per keyboard-interactive einen TOTP-Code verlangt (Geheimnis in `target/ssh-testkette/totp_secret`); dahinter dieselben Jump und Ziel. `start` und `stop` gibt es auch einzeln.
+- Tests gegen die Jump-Host-Kette (braucht Docker): `scripts/ssh-testkette.sh run` startet Bastion, Jump und Ziel als Container, einen eigenen `ssh-agent` mit dem Testschlüssel, führt `cargo test --test chain -- --ignored` aus und baut alles wieder ab, auch bei Fehlern. Von außen erreichbar sind nur die Bastionen, die Bastion mit Passwort auf `127.0.0.1:2223` (anderer Port über `AMISCARA_SSH_CHAIN_PORT`); jeder Sprung hat eigenen Benutzer, eigene Zugangsdaten und eigenen Host-Key, alles in `target/ssh-testkette/`. Daneben läuft `otp-bastion` auf `127.0.0.1:2224` (anderer Port über `AMISCARA_SSH_OTP_PORT`), eine Bastion, die nach dem Schlüssel `id_otp` per keyboard-interactive einen TOTP-Code verlangt (Geheimnis in `target/ssh-testkette/totp_secret`); dahinter dieselben Jump und Ziel. `start` und `stop` gibt es auch einzeln.
 
 ## Beispiel
 
@@ -115,9 +115,10 @@ bastion.keyboard_interactive = Some(Arc::new(Dialog));
 ```
 
 - Während der Frage meldet der Sprung `HopState::AwaitingInput`. Die Wartezeit zählt nicht zu `PoolConfig::connect_timeout` und nicht zur Latenz.
-- `None` als Antwort bricht ab: `SshError::Cancelled`, im Ereignis `HopFailure::Cancelled`. Auch ein fallengelassenes `connect` während der Frage hinterlässt nichts.
-- Ein abgelehnter Code wird auf derselben Verbindung neu erfragt, bis zu dreimal (`attempt` 1 bis 3), danach `SshError::AuthFailed`.
-- Der Pool hält einen Sprung, der gefragt hat, nach der letzten `Lease` noch offen: `keep_open` der Antwort, sonst `PoolConfig::code_grace` (60 s). In dieser Zeit braucht eine neue Sitzung keinen Code, auch nicht nach einem Fehler weiter hinten, etwa einer Host-Key-Bestätigung. `SessionPool::close_idle` schließt alle ungenutzten Verbindungen sofort, etwa beim Sperren der App. Schließt die Bastion ungenutzte Verbindungen selbst (OpenSSH `UnusedConnectionTimeout`), endet das Offenhalten früher.
+- `None` als Antwort bricht ab: `SshError::Cancelled`, im Ereignis `HopFailure::Cancelled`. Vom fragenden Sprung bleibt nichts im Pool, auch nicht bei einem fallengelassenen `connect` während der Frage; ein Sprung davor, der schon einen Code bekommen hat, bleibt wie nach der letzten `Lease` offen.
+- Ein abgelehnter Code wird auf derselben Verbindung neu erfragt, höchstens drei Versuche (`attempt` 1 bis 3), danach `SshError::AuthFailed`. Verlangt der Server mehrere Schritte per keyboard-interactive nacheinander, bleibt `attempt` beim nächsten Schritt gleich.
+- Die Wartezeit begrenzt der Server selbst (OpenSSH `LoginGraceTime`, meist 120 s); antwortet der Nutzer später, endet der Aufbau mit `HopFailure::Closed`.
+- Der Pool hält einen Sprung, der gefragt hat, nach der letzten `Lease` noch offen: `keep_open` der Antwort, sonst `PoolConfig::code_grace` (60 s). In dieser Zeit braucht eine neue Sitzung keinen Code, auch nicht nach einem Fehler weiter hinten, etwa einer Host-Key-Bestätigung. `SessionPool::close_idle` schließt alle ungenutzten Verbindungen sofort, etwa beim Sperren der App. Schließt die Bastion ungenutzte Verbindungen selbst (OpenSSH `UnusedConnectionTimeout`), endet das Offenhalten früher. Offengehalten wird nur, wenn die letzte `Lease` in einer Tokio-Runtime fallengelassen wird; außerhalb davon (etwa auf einem fremden Thread) schließt der Sprung sofort.
 - russh kopiert die Antworten beim Senden in einfache `String`s; nur die Kopien in `KeyboardAnswer` werden beim Drop gelöscht.
 
 ## SFTP
