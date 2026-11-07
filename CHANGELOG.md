@@ -4,6 +4,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-07
+
 ### Added
 
 - SFTP: `Session::open_sftp` startet das Subsystem `sftp` auf einem neuen Kanal, auch hinter Jump Hosts, und gibt eine `russh_sftp::client::SftpSession` zurück; `russh_sftp` wird mit exportiert. Neuer Fehler `SshError::SftpUnavailable` (staude/amiscara-connect#29).
@@ -44,7 +46,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/staude/amiscara-ssh/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/staude/amiscara-ssh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/staude/amiscara-ssh/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/staude/amiscara-ssh/releases/tag/v0.1.0
