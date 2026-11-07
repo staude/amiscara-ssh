@@ -4,6 +4,15 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+### Added
+
+- SFTP: `Session::open_sftp` startet das Subsystem `sftp` auf einem neuen Kanal, auch hinter Jump Hosts, und gibt eine `russh_sftp::client::SftpSession` zurück; `russh_sftp` wird mit exportiert. Neuer Fehler `SshError::SftpUnavailable` (staude/amiscara-connect#29).
+- Container-Test für Anlegen, Schreiben, Lesen, Umbenennen und Löschen per SFTP, Test über zwei Sprünge in der Testkette; deren Server bieten jetzt `internal-sftp` an.
+
+### Changed
+
+- `SshError` hat die neue Variante `SftpUnavailable`; wer vollständig darauf matcht, ergänzt sie.
+
 ## [0.3.0] - 2026-11-05
 
 ### Added

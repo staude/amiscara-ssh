@@ -13,6 +13,7 @@ use amiscara_ssh::{
     HostKeyPolicy, Identity, PtySize, Session, Shell, ShellEvent, SshError, SshTarget, Zeroizing,
     keys,
 };
+use tokio::io::AsyncWriteExt;
 
 const HOST: &str = "127.0.0.1";
 const USER: &str = "tester";
@@ -238,6 +239,42 @@ async fn shell_killed_by_signal_reports_it() -> TestResult {
     })
     .await?;
     assert_eq!(signal.as_deref(), Some("KILL"));
+    session.disconnect().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn sftp_creates_writes_reads_renames_and_removes() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let session = Session::connect(&target(key_identity(), tofu(&dir))).await?;
+    let sftp = session.open_sftp().await?;
+    let home = sftp.canonicalize(".").await?;
+    let base = format!("{home}/sftp-test-{}", std::process::id());
+    sftp.create_dir(base.as_str()).await?;
+
+    let first = format!("{base}/eins.txt");
+    let second = format!("{base}/zwei.txt");
+    // `write` needs an existing file, `create` makes it.
+    let mut file = sftp.create(first.as_str()).await?;
+    file.write_all(b"hallo sftp").await?;
+    file.shutdown().await?;
+    assert_eq!(sftp.read(first.as_str()).await?, b"hallo sftp");
+    let names: Vec<String> = sftp
+        .read_dir(base.as_str())
+        .await?
+        .map(|entry| entry.file_name())
+        .collect();
+    assert_eq!(names, vec!["eins.txt".to_owned()]);
+
+    sftp.rename(first.as_str(), second.as_str()).await?;
+    assert!(!sftp.try_exists(first.as_str()).await?);
+    assert_eq!(sftp.metadata(second.as_str()).await?.len(), 10);
+
+    sftp.remove_file(second.as_str()).await?;
+    sftp.remove_dir(base.as_str()).await?;
+    assert!(!sftp.try_exists(base.as_str()).await?);
+    sftp.close().await?;
     session.disconnect().await?;
     Ok(())
 }

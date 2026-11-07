@@ -38,6 +38,10 @@ pub enum SshError {
     /// long.
     #[error("timed out connecting to {0}")]
     Timeout(String),
+    /// The server offers no SFTP, refused the subsystem, or the SFTP
+    /// protocol did not start. Holds the reason.
+    #[error("sftp unavailable: {0}")]
+    SftpUnavailable(String),
     /// A hop of a [`crate::Route`] failed: `index` counts from the first jump
     /// (0), the target is the last index; `hop` is `user@host:port`.
     #[error("hop {index} ({hop}): {source}")]
@@ -83,6 +87,7 @@ mod tests {
         assert!(!SshError::Refused("pty".into()).needs_user());
         assert!(!SshError::Io(std::io::Error::other("x")).needs_user());
         assert!(!SshError::Timeout("u@h:22".into()).needs_user());
+        assert!(!SshError::SftpUnavailable("refused".into()).needs_user());
         let hop = |source| SshError::Hop {
             index: 1,
             hop: "u@jump:22".into(),
