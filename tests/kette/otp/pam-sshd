@@ -1,0 +1,4 @@
+# Only the one-time code; the key was checked by sshd before.
+auth required pam_google_authenticator.so
+@include common-account
+@include common-session

@@ -1,6 +1,7 @@
-# Test chain of amiscara-ssh: client -> bastion -> jump -> target.
-# Only the bastion is reachable from outside, and only on 127.0.0.1; jump and
-# target sit in internal networks. Started by scripts/ssh-testkette.sh.
+# Test chain of amiscara-ssh: client -> bastion -> jump -> target, and a
+# second bastion with one-time code: client -> otp-bastion -> jump -> target.
+# Only the bastions are reachable from outside, and only on 127.0.0.1; jump
+# and target sit in internal networks. Started by scripts/ssh-testkette.sh.
 name: amiscara-ssh-chain
 
 x-hop: &hop
@@ -17,6 +18,15 @@ services:
       ROLE: bastion
     ports:
       - "127.0.0.1:${AMISCARA_SSH_CHAIN_PORT:-2223}:22"
+    networks: [aussen, mitte]
+  otp-bastion:
+    build: otp
+    image: amiscara-ssh-chain-otp
+    hostname: otp-bastion
+    volumes:
+      - ../../target/ssh-testkette:/state:ro
+    ports:
+      - "127.0.0.1:${AMISCARA_SSH_OTP_PORT:-2224}:22"
     networks: [aussen, mitte]
   jump:
     <<: *hop

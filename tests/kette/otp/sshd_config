@@ -1,0 +1,15 @@
+# Bastion with one-time code: the key alone is not enough, sshd then asks
+# for the TOTP code by keyboard-interactive (PAM, pam_google_authenticator).
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PermitRootLogin no
+AuthenticationMethods publickey,keyboard-interactive
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication yes
+UsePAM yes
+AllowTcpForwarding yes
+AllowAgentForwarding no
+X11Forwarding no
+PrintMotd no
+LogLevel VERBOSE
