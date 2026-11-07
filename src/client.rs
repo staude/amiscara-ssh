@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use russh::client::{self, AuthResult, Handle};
+use russh::MethodKind;
+use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, load_secret_key};
 use russh::{Channel, ChannelStream, Disconnect};
@@ -17,6 +18,11 @@ use zeroize::Zeroizing;
 use crate::SshError;
 use crate::chain::Reporter;
 use crate::host_key::{HostKeyCheck, HostKeyPolicy};
+use crate::prompt::{KeyboardInteractive, KeyboardPrompt, PromptLine};
+
+/// Sign-in rounds by keyboard-interactive before giving up, as OpenSSH asks
+/// three times.
+const KEYBOARD_ROUNDS: u32 = 3;
 
 /// How to sign in.
 #[derive(Clone)]
@@ -63,6 +69,11 @@ pub struct SshTarget {
     /// session. Off by default; in a [`crate::Route`] it only ever applies to
     /// the target, never to a jump.
     pub agent_forward: bool,
+    /// Answers questions of the server during sign-in, for example a
+    /// one-time code after the key. Asked only if the server offers
+    /// keyboard-interactive once [`SshTarget::identity`] alone is not
+    /// enough; `None` ends there in [`SshError::AuthFailed`].
+    pub keyboard_interactive: Option<Arc<dyn KeyboardInteractive>>,
 }
 
 impl SshTarget {
@@ -76,6 +87,10 @@ impl SshTarget {
 pub struct Session {
     handle: Handle<HostKeyCheck>,
     agent_forward: bool,
+    /// The sign-in asked the user something.
+    asked: bool,
+    /// `keep_open` of the last answer during sign-in.
+    keep_open: Option<Duration>,
 }
 
 /// Transport settings of a single connection: keepalive every 15 s.
@@ -140,6 +155,7 @@ impl Session {
         let (check, refusal) =
             HostKeyCheck::new(&target.host, target.port, target.host_key.clone());
         let check = check.with_agent_forward(target.agent_forward);
+        let reporter_ref = reporter.clone();
         let stream = Watched {
             inner: stream,
             reporter,
@@ -153,7 +169,7 @@ impl Session {
         };
 
         let user = target.user.as_str();
-        let authenticated = match &target.identity {
+        let first = match &target.identity {
             Identity::File { path, passphrase } => {
                 let key = load_secret_key(path, passphrase.as_ref().map(|p| p.as_str()))
                     .map_err(|e| SshError::Key(e.to_string()))?;
@@ -162,22 +178,53 @@ impl Session {
             Identity::Agent => authenticate_with_agent(&mut handle, user).await?,
             Identity::Key(key) => authenticate_with_key(&mut handle, user, Arc::clone(key)).await?,
             Identity::Password(password) => {
-                let result = handle
+                handle
                     .authenticate_password(user, password.as_str())
-                    .await?;
-                matches!(result, AuthResult::Success)
+                    .await?
             }
         };
-        if !authenticated {
-            return Err(SshError::AuthFailed(format!(
-                "{}@{}",
-                target.user, target.host
-            )));
+        let failed = || SshError::AuthFailed(format!("{}@{}", target.user, target.host));
+        let mut asked = Asked::default();
+        match first {
+            AuthResult::Success => {}
+            AuthResult::Failure {
+                remaining_methods, ..
+            } => {
+                let prompter = target
+                    .keyboard_interactive
+                    .as_ref()
+                    .filter(|_| remaining_methods.contains(&MethodKind::KeyboardInteractive))
+                    .ok_or_else(failed)?;
+                let signed_in = authenticate_keyboard_interactive(
+                    &mut handle,
+                    target,
+                    prompter.as_ref(),
+                    reporter_ref.as_ref(),
+                    &mut asked,
+                )
+                .await?;
+                if !signed_in {
+                    return Err(failed());
+                }
+            }
         }
         Ok(Self {
             handle,
             agent_forward: target.agent_forward,
+            asked: asked.asked,
+            keep_open: asked.keep_open,
         })
+    }
+
+    /// How long a pool keeps this connection open once nobody uses it: what
+    /// the last answer during sign-in asked for, `grace` if the sign-in asked
+    /// without saying, otherwise not at all.
+    pub(crate) fn linger(&self, grace: Duration) -> Duration {
+        match (self.asked, self.keep_open) {
+            (true, Some(keep_open)) => keep_open,
+            (true, None) => grace,
+            (false, _) => Duration::ZERO,
+        }
     }
 
     /// Whether shells on this session forward the local SSH agent.
@@ -289,18 +336,20 @@ async fn authenticate_with_key(
     handle: &mut Handle<HostKeyCheck>,
     user: &str,
     key: Arc<PrivateKey>,
-) -> Result<bool, SshError> {
+) -> Result<AuthResult, SshError> {
     let hash = handle.best_supported_rsa_hash().await?.flatten();
-    let result = handle
+    Ok(handle
         .authenticate_publickey(user, PrivateKeyWithHashAlg::new(key, hash))
-        .await?;
-    Ok(matches!(result, AuthResult::Success))
+        .await?)
 }
 
+/// Tries every key of the agent. The result is the first success, else the
+/// first key the server accepted as a partial success (it then wants more,
+/// for example a one-time code), else the last refusal.
 async fn authenticate_with_agent(
     handle: &mut Handle<HostKeyCheck>,
     user: &str,
-) -> Result<bool, SshError> {
+) -> Result<AuthResult, SshError> {
     #[cfg(unix)]
     let agent = AgentClient::connect_env().await;
     // Windows OpenSSH runs its agent on a fixed named pipe.
@@ -312,14 +361,114 @@ async fn authenticate_with_agent(
         .await
         .map_err(|e| SshError::Key(e.to_string()))?;
     let hash = handle.best_supported_rsa_hash().await?.flatten();
+    let mut last = AuthResult::Failure {
+        remaining_methods: russh::MethodSet::empty(),
+        partial_success: false,
+    };
     for identity in identities {
         let key = identity.public_key().into_owned();
         let result = handle
             .authenticate_publickey_with(user, key, hash, &mut agent)
             .await
             .map_err(|e| SshError::Key(e.to_string()))?;
-        if matches!(result, AuthResult::Success) {
-            return Ok(true);
+        match result {
+            AuthResult::Success
+            | AuthResult::Failure {
+                partial_success: true,
+                ..
+            } => return Ok(result),
+            AuthResult::Failure { .. } => last = result,
+        }
+    }
+    Ok(last)
+}
+
+/// What the user was asked during sign-in.
+#[derive(Default)]
+struct Asked {
+    asked: bool,
+    keep_open: Option<Duration>,
+}
+
+/// Signs in by keyboard-interactive, asking `prompter` for every request
+/// with questions; up to [`KEYBOARD_ROUNDS`] rounds while the server keeps
+/// refusing and offering the method again. `Ok(false)` is a refusal, a
+/// cancelled question ends in [`SshError::Cancelled`].
+async fn authenticate_keyboard_interactive(
+    handle: &mut Handle<HostKeyCheck>,
+    target: &SshTarget,
+    prompter: &dyn KeyboardInteractive,
+    reporter: Option<&Reporter>,
+    asked: &mut Asked,
+) -> Result<bool, SshError> {
+    let (route, index) = match reporter {
+        Some(reporter) => (reporter.route(), reporter.index()),
+        None => (vec![target.label()], 0),
+    };
+    for attempt in 1..=KEYBOARD_ROUNDS {
+        let mut reply = handle
+            .authenticate_keyboard_interactive_start(target.user.as_str(), None)
+            .await?;
+        loop {
+            match reply {
+                KeyboardInteractiveAuthResponse::Success => return Ok(true),
+                KeyboardInteractiveAuthResponse::Failure {
+                    remaining_methods, ..
+                } => {
+                    if remaining_methods.contains(&MethodKind::KeyboardInteractive) {
+                        break;
+                    }
+                    return Ok(false);
+                }
+                KeyboardInteractiveAuthResponse::InfoRequest {
+                    name,
+                    instructions,
+                    prompts,
+                } => {
+                    if prompts.is_empty() {
+                        reply = handle
+                            .authenticate_keyboard_interactive_respond(Vec::new())
+                            .await?;
+                        continue;
+                    }
+                    let expected = prompts.len();
+                    let prompt = KeyboardPrompt {
+                        route: route.clone(),
+                        index,
+                        name,
+                        instructions,
+                        prompts: prompts
+                            .into_iter()
+                            .map(|p| PromptLine {
+                                text: p.prompt,
+                                echo: p.echo,
+                            })
+                            .collect(),
+                        attempt,
+                    };
+                    let answer = {
+                        // The time the user takes is no part of the limit.
+                        let _pause = reporter.map(Reporter::awaiting_input);
+                        prompter.ask(prompt).await
+                    };
+                    let Some(answer) = answer else {
+                        return Err(SshError::Cancelled(target.label()));
+                    };
+                    if answer.responses.len() != expected {
+                        return Ok(false);
+                    }
+                    asked.asked = true;
+                    asked.keep_open = answer.keep_open;
+                    let responses = answer
+                        .responses
+                        .iter()
+                        .map(|r| r.as_str().to_owned())
+                        .collect();
+                    reply = handle
+                        .authenticate_keyboard_interactive_respond(responses)
+                        .await?;
+                }
+            }
         }
     }
     Ok(false)
@@ -343,6 +492,7 @@ mod tests {
             identity: password.clone(),
             host_key: HostKeyPolicy::Pinned(None),
             agent_forward: false,
+            keyboard_interactive: None,
         };
         for text in [
             format!("{password:?}"),

@@ -18,6 +18,16 @@
 //! [`HopFailure`], closed). Agent forwarding is off unless the target turns
 //! it on with [`SshTarget::agent_forward`], and never reaches a jump.
 //!
+//! One-time codes: a server that asks questions during sign-in, for example
+//! a bastion that wants a code after the key, is answered by the
+//! [`KeyboardInteractive`] of its [`SshTarget`] via keyboard-interactive.
+//! The app gets a [`KeyboardPrompt`] naming the asking hop and the route
+//! and returns a [`KeyboardAnswer`], or `None` to cancel
+//! ([`SshError::Cancelled`]). A pool keeps such a hop open after its last
+//! lease ([`KeyboardAnswer::keep_open`], [`PoolConfig::code_grace`]), so the
+//! next session needs no new code; [`SessionPool::close_idle`] closes it
+//! early.
+//!
 //! Files: [`Session::open_sftp`] starts the `sftp` subsystem on a session,
 //! also one behind jumps, and returns a [`russh_sftp::client::SftpSession`].
 //! The crate re-exports [`russh_sftp`], so apps use the same version.
@@ -30,6 +40,7 @@ mod client;
 mod error;
 mod host_key;
 pub mod keys;
+mod prompt;
 mod sftp;
 mod shell;
 
@@ -37,6 +48,7 @@ pub use chain::{HopEvent, HopFailure, HopState, Lease, PoolConfig, Route, Sessio
 pub use client::{Identity, Session, SshTarget};
 pub use error::SshError;
 pub use host_key::{HostKeyPolicy, HostKeyVerdict, HostKeyVerifier, trust_host_key};
+pub use prompt::{KeyboardAnswer, KeyboardInteractive, KeyboardPrompt, PromptFuture, PromptLine};
 pub use shell::{PtySize, Shell, ShellEvent, ShellReader, ShellWriter};
 
 pub use russh::client::Msg;

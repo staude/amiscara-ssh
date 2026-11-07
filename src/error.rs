@@ -42,6 +42,10 @@ pub enum SshError {
     /// protocol did not start. Holds the reason.
     #[error("sftp unavailable: {0}")]
     SftpUnavailable(String),
+    /// The user cancelled the sign-in to this host (`user@host:port`), for
+    /// example by answering a [`crate::KeyboardPrompt`] with `None`.
+    #[error("sign-in to {0} was cancelled")]
+    Cancelled(String),
     /// A hop of a [`crate::Route`] failed: `index` counts from the first jump
     /// (0), the target is the last index; `hop` is `user@host:port`.
     #[error("hop {index} ({hop}): {source}")]
@@ -64,6 +68,7 @@ impl SshError {
                 | Self::HostKeyChanged { .. }
                 | Self::AuthFailed(_)
                 | Self::Key(_)
+                | Self::Cancelled(_)
         )
     }
 }
@@ -84,6 +89,7 @@ mod tests {
             }
             .needs_user()
         );
+        assert!(SshError::Cancelled("u@h:22".into()).needs_user());
         assert!(!SshError::Refused("pty".into()).needs_user());
         assert!(!SshError::Io(std::io::Error::other("x")).needs_user());
         assert!(!SshError::Timeout("u@h:22".into()).needs_user());
@@ -95,5 +101,6 @@ mod tests {
         };
         assert!(hop(SshError::AuthFailed("u@jump".into())).needs_user());
         assert!(!hop(SshError::Timeout("u@jump:22".into())).needs_user());
+        assert!(hop(SshError::Cancelled("u@jump:22".into())).needs_user());
     }
 }
