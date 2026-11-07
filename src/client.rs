@@ -74,9 +74,10 @@ pub struct SshTarget {
     /// the target, never to a jump.
     pub agent_forward: bool,
     /// Answers questions of the server during sign-in, for example a
-    /// one-time code after the key. Asked only if the server offers
-    /// keyboard-interactive once [`SshTarget::identity`] alone is not
-    /// enough; `None` ends there in [`SshError::AuthFailed`].
+    /// one-time code after the key. Asked only if the server accepted
+    /// [`SshTarget::identity`] as a partial success and still wants
+    /// keyboard-interactive; a refused identity is never followed by a
+    /// question. `None` ends there in [`SshError::AuthFailed`].
     pub keyboard_interactive: Option<Arc<dyn KeyboardInteractive>>,
 }
 
@@ -192,12 +193,18 @@ impl Session {
         match first {
             AuthResult::Success => {}
             AuthResult::Failure {
-                remaining_methods, ..
+                remaining_methods,
+                partial_success,
             } => {
+                // Only a server that accepted the credentials and wants more
+                // asks; a refused key or password stays a refusal.
                 let prompter = target
                     .keyboard_interactive
                     .as_ref()
-                    .filter(|_| remaining_methods.contains(&MethodKind::KeyboardInteractive))
+                    .filter(|_| {
+                        partial_success
+                            && remaining_methods.contains(&MethodKind::KeyboardInteractive)
+                    })
                     .ok_or_else(failed)?;
                 let signed_in = authenticate_keyboard_interactive(
                     &mut handle,
@@ -364,11 +371,6 @@ async fn authenticate_with_agent(
         .request_identities()
         .await
         .map_err(|e| SshError::Key(e.to_string()))?;
-    if identities.is_empty() {
-        // Nothing to offer; `none` still tells which methods are left, for
-        // example keyboard-interactive.
-        return Ok(handle.authenticate_none(user).await?);
-    }
     let hash = handle.best_supported_rsa_hash().await?.flatten();
     let mut last = AuthResult::Failure {
         remaining_methods: russh::MethodSet::empty(),

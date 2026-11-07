@@ -87,7 +87,7 @@ while let Ok(event) = events.try_recv() {
 
 ## Einmalcodes
 
-Will ein Server bei der Anmeldung etwas wissen, etwa eine Bastion nach dem Schlüssel einen Einmalcode, fragt das Crate per keyboard-interactive die App: `SshTarget::keyboard_interactive` nimmt ein `Arc<dyn KeyboardInteractive>`. Gefragt wird nur der Sprung, der fragt, und nur wenn der Server die Methode anbietet, nachdem die `Identity` allein nicht gereicht hat.
+Will ein Server bei der Anmeldung etwas wissen, etwa eine Bastion nach dem Schlüssel einen Einmalcode, fragt das Crate per keyboard-interactive die App: `SshTarget::keyboard_interactive` nimmt ein `Arc<dyn KeyboardInteractive>`. Gefragt wird nur der Sprung, der fragt, und nur wenn der Server die `Identity` als Teilerfolg angenommen hat und danach noch keyboard-interactive verlangt. Abgelehnte Schlüssel oder Passwörter bleiben eine Ablehnung (`SshError::AuthFailed`), ohne Frage; ein Server, der nur keyboard-interactive anbietet, wird nicht unterstützt.
 
 ```rust
 use std::sync::Arc;
