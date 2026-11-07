@@ -40,6 +40,7 @@ fn target(identity: Identity, host_key: HostKeyPolicy) -> SshTarget {
         identity,
         host_key,
         agent_forward: false,
+        keyboard_interactive: None,
     }
 }
 

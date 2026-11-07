@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use russh::client;
-use tokio::sync::{OwnedMutexGuard, broadcast};
+use tokio::sync::{OwnedMutexGuard, broadcast, watch};
 
 use crate::{Session, SshError, SshTarget};
 
@@ -50,6 +50,12 @@ pub struct PoolConfig {
     pub keepalive_interval: Duration,
     /// Unanswered keepalives after which a hop counts as gone.
     pub keepalive_max: usize,
+    /// How long a hop that asked a question during sign-in (for example a
+    /// one-time code) stays open after its last user is gone, unless the
+    /// answer said otherwise ([`crate::KeyboardAnswer::keep_open`]). So a
+    /// quick retry, for example after confirming a host key further down,
+    /// needs no second code. Hops that asked nothing close at once.
+    pub code_grace: Duration,
 }
 
 impl Default for PoolConfig {
@@ -58,6 +64,7 @@ impl Default for PoolConfig {
             connect_timeout: Duration::from_secs(10),
             keepalive_interval: Duration::from_secs(5),
             keepalive_max: 3,
+            code_grace: Duration::from_secs(60),
         }
     }
 }
@@ -78,6 +85,10 @@ pub struct HopEvent {
 pub enum HopState {
     /// A new connection to the hop is being set up.
     Connecting,
+    /// The hop asked a question during sign-in, for example a one-time
+    /// code, and waits for the answer of
+    /// [`crate::KeyboardInteractive::ask`].
+    AwaitingInput,
     /// The hop is signed in. `latency` is the time from opening the
     /// transport to the end of sign-in, measured once.
     Connected { latency: Duration },
@@ -106,6 +117,8 @@ pub enum HopFailure {
     HostKeyChanged,
     /// The hop refused every credential.
     AuthFailed,
+    /// The user cancelled a question of the hop during sign-in.
+    Cancelled,
     /// The connection ended while setting up.
     Closed,
     /// Anything else, for example an unreadable key file.
@@ -120,6 +133,7 @@ impl From<&SshError> for HopFailure {
             SshError::UnknownHostKey { .. } => Self::HostKeyUnknown,
             SshError::HostKeyChanged { .. } => Self::HostKeyChanged,
             SshError::AuthFailed(_) => Self::AuthFailed,
+            SshError::Cancelled(_) => Self::Cancelled,
             SshError::Ssh(russh::Error::ChannelOpenFailure(_)) => Self::ChannelRefused,
             SshError::Ssh(
                 russh::Error::Disconnect
@@ -137,17 +151,71 @@ impl From<&SshError> for HopFailure {
     }
 }
 
-/// Reports [`HopState::Closed`] once for a connection that made it into
-/// the pool (or out as a fresh one); a failed set-up stays silent.
+/// Time the set-up of a hop spent waiting for the user.
+#[derive(Debug, Clone, Copy, Default)]
+struct Pause {
+    since: Option<Instant>,
+    total: Duration,
+}
+
+impl Pause {
+    /// Paused time so far, the running pause included.
+    fn elapsed(&self) -> Duration {
+        self.total + self.since.map_or(Duration::ZERO, |since| since.elapsed())
+    }
+}
+
+/// A running pause of the set-up limit; ends on drop, also when the
+/// question is cancelled.
+pub(crate) struct Paused(Arc<watch::Sender<Pause>>);
+
+impl Drop for Paused {
+    fn drop(&mut self) {
+        self.0.send_modify(|pause| {
+            if let Some(since) = pause.since.take() {
+                pause.total += since.elapsed();
+            }
+        });
+    }
+}
+
+/// Reports what happens to one hop while it is set up and
+/// [`HopState::Closed`] once for a connection that made it into the pool
+/// (or out as a fresh one); a failed set-up stays silent on close.
 #[derive(Clone)]
 pub(crate) struct Reporter {
     events: broadcast::Sender<HopEvent>,
     route: Arc<[String]>,
     index: usize,
     armed: Arc<AtomicBool>,
+    pause: Arc<watch::Sender<Pause>>,
 }
 
 impl Reporter {
+    pub(crate) fn route(&self) -> Vec<String> {
+        self.route.to_vec()
+    }
+
+    pub(crate) fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Reports [`HopState::AwaitingInput`] and pauses the set-up limit
+    /// until the returned guard is dropped.
+    pub(crate) fn awaiting_input(&self) -> Paused {
+        self.pause.send_modify(|pause| {
+            pause.since.get_or_insert_with(Instant::now);
+        });
+        self.events
+            .send(HopEvent {
+                route: self.route.to_vec(),
+                index: self.index,
+                state: HopState::AwaitingInput,
+            })
+            .ok();
+        Paused(Arc::clone(&self.pause))
+    }
+
     fn arm(&self) {
         self.armed.store(true, Ordering::SeqCst);
     }
@@ -200,6 +268,25 @@ struct Entry {
     /// Live leases on this entry plus connections built on top of it.
     users: usize,
     parent: Option<Slot>,
+    /// How long the entry stays in the pool once `users` is 0.
+    keep_open: Duration,
+    /// Set while the entry waits unused; only the timer with this token may
+    /// close it.
+    idle: Option<u64>,
+}
+
+/// An unused entry that stays open until the timer with `token` runs out.
+struct Linger {
+    slot: Slot,
+    token: u64,
+    after: Duration,
+}
+
+/// What a change of the pool leaves to do once its lock is released.
+#[derive(Default)]
+struct Effects {
+    closing: Vec<Arc<Session>>,
+    lingering: Vec<Linger>,
 }
 
 #[derive(Default)]
@@ -211,8 +298,10 @@ struct Entries {
 impl Entries {
     /// Drops one use of `slot`. An entry nobody uses any more leaves the
     /// pool, and so does its parent once it has no other user; their
-    /// sessions go to `closing`, the deepest first.
-    fn release(&mut self, slot: Slot, closing: &mut Vec<Arc<Session>>) {
+    /// sessions go to `closing`, the deepest first. An entry with
+    /// `keep_open` stays instead, together with the use of its parent, and
+    /// goes to `lingering`.
+    fn release(&mut self, slot: Slot, effects: &mut Effects) {
         let mut next = Some(slot);
         while let Some((key, generation)) = next.take() {
             let Some(entry) = self.map.get_mut(&key) else {
@@ -225,9 +314,70 @@ impl Entries {
             if entry.users > 0 {
                 return;
             }
+            if !entry.keep_open.is_zero() && !entry.session.is_closed() {
+                let token = self.next_generation;
+                self.next_generation += 1;
+                entry.idle = Some(token);
+                effects.lingering.push(Linger {
+                    slot: (key, generation),
+                    token,
+                    after: entry.keep_open,
+                });
+                return;
+            }
             if let Some(entry) = self.map.remove(&key) {
-                closing.push(entry.session);
+                effects.closing.push(entry.session);
                 next = entry.parent;
+            }
+        }
+    }
+
+    /// The time of a lingering entry ran out: if it is still unused and
+    /// waits for this timer, it leaves the pool and gives its parent back.
+    fn expire(&mut self, linger: &Linger, effects: &mut Effects) {
+        let (key, generation) = &linger.slot;
+        let Some(entry) = self.map.get(key) else {
+            return;
+        };
+        if entry.generation != *generation || entry.idle != Some(linger.token) || entry.users > 0 {
+            return;
+        }
+        if let Some(entry) = self.map.remove(key) {
+            effects.closing.push(entry.session);
+            if let Some(parent) = entry.parent {
+                self.release(parent, effects);
+            }
+        }
+    }
+
+    /// Removes every entry nobody uses, also those that became unused by
+    /// it, and returns how many.
+    fn close_idle(&mut self, effects: &mut Effects) -> usize {
+        let mut count = 0;
+        loop {
+            let mut idle: Vec<Key> = self
+                .map
+                .iter()
+                .filter(|(_, entry)| entry.users == 0)
+                .map(|(key, _)| key.clone())
+                .collect();
+            if idle.is_empty() {
+                return count;
+            }
+            // The deepest first, so they close from the inside out.
+            idle.sort_by_key(|key| std::cmp::Reverse(key.len()));
+            for key in idle {
+                let Some(entry) = self.map.remove(&key) else {
+                    continue;
+                };
+                count += 1;
+                effects.closing.push(entry.session);
+                if let Some((parent_key, parent_generation)) = entry.parent
+                    && let Some(parent) = self.map.get_mut(&parent_key)
+                    && parent.generation == parent_generation
+                {
+                    parent.users = parent.users.saturating_sub(1);
+                }
             }
         }
     }
@@ -239,6 +389,7 @@ impl Entries {
             return None;
         }
         entry.users += 1;
+        entry.idle = None;
         Some((entry.generation, Arc::clone(&entry.session)))
     }
 
@@ -249,7 +400,8 @@ impl Entries {
         key: Key,
         session: Arc<Session>,
         parent: Option<Slot>,
-        closing: &mut Vec<Arc<Session>>,
+        keep_open: Duration,
+        effects: &mut Effects,
     ) -> u64 {
         let stale: Vec<Key> = self
             .map
@@ -259,13 +411,13 @@ impl Entries {
             .collect();
         for stale_key in stale {
             if let Some(entry) = self.map.remove(&stale_key) {
-                closing.push(entry.session);
+                effects.closing.push(entry.session);
                 // Entries behind it pointed into the removed part; only the
                 // entry at `key` held a use of something still in the pool.
                 if stale_key.len() == key.len()
                     && let Some(old_parent) = entry.parent
                 {
-                    self.release(old_parent, closing);
+                    self.release(old_parent, effects);
                 }
             }
         }
@@ -274,6 +426,7 @@ impl Entries {
             && entry.generation == *parent_generation
         {
             entry.users += 1;
+            entry.idle = None;
         }
         let generation = self.next_generation;
         self.next_generation += 1;
@@ -284,6 +437,8 @@ impl Entries {
                 session,
                 users: 1,
                 parent,
+                keep_open,
+                idle: None,
             },
         );
         generation
@@ -296,6 +451,7 @@ struct Shared {
     events: broadcast::Sender<HopEvent>,
     config: Arc<client::Config>,
     connect_timeout: Duration,
+    code_grace: Duration,
 }
 
 impl Shared {
@@ -303,13 +459,34 @@ impl Shared {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn release(&self, slot: Option<Slot>) {
+    fn release(self: &Arc<Self>, slot: Option<Slot>) {
         let Some(slot) = slot else {
             return;
         };
-        let mut closing = Vec::new();
-        self.entries().release(slot, &mut closing);
-        close_later(closing);
+        let mut effects = Effects::default();
+        self.entries().release(slot, &mut effects);
+        self.apply(effects);
+    }
+
+    /// Closes what left the pool and starts the timers of lingering
+    /// entries. Without a runtime there is no timer, so they close at once.
+    fn apply(self: &Arc<Self>, effects: Effects) {
+        close_later(effects.closing);
+        for linger in effects.lingering {
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    let shared = Arc::downgrade(self);
+                    runtime.spawn(expire_later(shared, linger));
+                }
+                Err(_) => self.expire(&linger),
+            }
+        }
+    }
+
+    fn expire(self: &Arc<Self>, linger: &Linger) {
+        let mut effects = Effects::default();
+        self.entries().expire(linger, &mut effects);
+        self.apply(effects);
     }
 
     fn emit(&self, route: &Arc<[String]>, index: usize, state: HopState) {
@@ -329,6 +506,15 @@ impl Shared {
             Arc::clone(locks.entry(key.clone()).or_default())
         };
         lock.lock_owned().await
+    }
+}
+
+/// Timer of a lingering entry. Holds the pool only weakly: a dropped pool
+/// closes everything anyway.
+async fn expire_later(shared: Weak<Shared>, linger: Linger) {
+    tokio::time::sleep(linger.after).await;
+    if let Some(shared) = shared.upgrade() {
+        shared.expire(&linger);
     }
 }
 
@@ -396,7 +582,11 @@ fn close_later(sessions: Vec<Arc<Session>>) {
 /// part of the key: a live connection is reused as it was signed in and
 /// checked, a changed policy only applies to the next new connection. A
 /// connection stays in the pool while a [`Lease`] or a connection behind it
-/// uses it; once the last one is gone, it is closed. Dead connections are
+/// uses it; once the last one is gone, it is closed. A hop that asked a
+/// question during sign-in (a one-time code) stays open a while longer, for
+/// [`crate::KeyboardAnswer::keep_open`] or else [`PoolConfig::code_grace`],
+/// so a new session in that time needs no new code;
+/// [`SessionPool::close_idle`] ends that wait at once. Dead connections are
 /// replaced on the next [`SessionPool::connect`], together with everything
 /// behind them, while the live hops before them are kept.
 #[derive(Clone)]
@@ -421,6 +611,7 @@ impl SessionPool {
                 events,
                 config: Arc::new(client),
                 connect_timeout: config.connect_timeout,
+                code_grace: config.code_grace,
             }),
         }
     }
@@ -431,12 +622,24 @@ impl SessionPool {
         self.shared.events.subscribe()
     }
 
+    /// Closes every connection nobody uses at once, also those kept open
+    /// after a one-time code, for example when the user locks the app.
+    /// Returns how many were closed.
+    pub fn close_idle(&self) -> usize {
+        let mut effects = Effects::default();
+        let count = self.shared.entries().close_idle(&mut effects);
+        self.shared.apply(effects);
+        count
+    }
+
     /// A session on the target of `route`, shared with every other lease on
     /// the same route. Jumps never forward the agent, whatever their
     /// `agent_forward` says.
     ///
     /// A failing hop ends in [`SshError::Hop`] with its index, and nothing
-    /// set up for this call stays in the pool.
+    /// set up for this call stays in the pool, except hops that asked a
+    /// one-time code: they stay as after the last lease, so a retry needs no
+    /// second code.
     pub async fn connect(&self, route: &Route) -> Result<Lease, SshError> {
         self.open(route, false).await
     }
@@ -495,6 +698,7 @@ impl SessionPool {
                 route: Arc::clone(&labels),
                 index,
                 armed: Arc::new(AtomicBool::new(false)),
+                pause: Arc::new(watch::channel(Pause::default()).0),
             };
             let built = self.build(hop, below.as_deref(), reporter.clone()).await;
             let (session, latency) = match built {
@@ -525,14 +729,16 @@ impl SessionPool {
                     shared: Arc::clone(shared),
                 });
             }
-            let mut closing = Vec::new();
+            let mut effects = Effects::default();
+            let keep_open = session.linger(shared.code_grace);
             let generation = shared.entries().insert(
                 key.clone(),
                 Arc::clone(&session),
                 hold.slot.clone(),
-                &mut closing,
+                keep_open,
+                &mut effects,
             );
-            close_later(closing);
+            shared.apply(effects);
             shared.release(hold.slot.replace((key.clone(), generation)));
             below = Some(session);
         }
@@ -551,7 +757,8 @@ impl SessionPool {
     }
 
     /// Opens the transport to `hop` (TCP, or a channel on `below`) and signs
-    /// in, within the time limit.
+    /// in, within the time limit. Time spent waiting for the user does not
+    /// count, neither towards the limit nor towards the latency.
     async fn build(
         &self,
         hop: &SshTarget,
@@ -560,6 +767,9 @@ impl SessionPool {
     ) -> Result<(Session, Duration), (SshError, HopFailure)> {
         let started = Instant::now();
         let config = Arc::clone(&self.shared.config);
+        // Held here, so `changed` below never fails while this runs.
+        let pause = Arc::clone(&reporter.pause);
+        let mut pauses = pause.subscribe();
         let set_up = async {
             let session = match below {
                 None => {
@@ -585,16 +795,38 @@ impl SessionPool {
                 (e, failure)
             })
         };
-        match tokio::time::timeout(self.shared.connect_timeout, set_up).await {
-            Ok(Ok(session)) => Ok((session, started.elapsed())),
-            Ok(Err(failed)) => Err(failed),
-            Err(_) => Err((SshError::Timeout(hop.label()), HopFailure::Timeout)),
+        tokio::pin!(set_up);
+        let limit = self.shared.connect_timeout;
+        let result = loop {
+            let current = *pauses.borrow_and_update();
+            if current.since.is_some() {
+                // Waiting for the user: no limit until the answer.
+                tokio::select! {
+                    result = &mut set_up => break Some(result),
+                    _ = pauses.changed() => continue,
+                }
+            }
+            let deadline = tokio::time::Instant::from_std(started + limit + current.total);
+            tokio::select! {
+                result = &mut set_up => break Some(result),
+                () = tokio::time::sleep_until(deadline) => break None,
+                _ = pauses.changed() => {}
+            }
+        };
+        match result {
+            Some(Ok(session)) => {
+                let waited = pauses.borrow().elapsed();
+                Ok((session, started.elapsed().saturating_sub(waited)))
+            }
+            Some(Err(failed)) => Err(failed),
+            None => Err((SshError::Timeout(hop.label()), HopFailure::Timeout)),
         }
     }
 }
 
 /// A session from a [`SessionPool`]. Dropping it gives the connection back;
-/// the pool closes what nobody uses any more.
+/// the pool closes what nobody uses any more, hops that asked a one-time
+/// code after their time to stay open.
 ///
 /// Close a lease by dropping it, not with [`Session::disconnect`]: that ends
 /// the shared connection for every other lease on it and for everything
@@ -617,14 +849,14 @@ impl Deref for Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let mut closing = Vec::new();
+        let mut effects = Effects::default();
         if self.own {
-            closing.push(Arc::clone(&self.session));
+            effects.closing.push(Arc::clone(&self.session));
         }
         if let Some(slot) = self.hold.take() {
-            self.shared.entries().release(slot, &mut closing);
+            self.shared.entries().release(slot, &mut effects);
         }
-        close_later(closing);
+        self.shared.apply(effects);
     }
 }
 
@@ -685,6 +917,7 @@ mod tests {
             identity: crate::Identity::Agent,
             host_key: crate::HostKeyPolicy::Pinned(None),
             agent_forward: false,
+            keyboard_interactive: None,
         };
         let route = Route {
             jumps: vec![hop("bastion"), hop("jump")],
