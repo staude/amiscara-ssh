@@ -24,6 +24,10 @@ use crate::prompt::{KeyboardInteractive, KeyboardPrompt, PromptLine};
 /// as servers usually allow.
 const KEYBOARD_ROUNDS: u32 = 3;
 
+/// Requests and steps of one keyboard-interactive sign-in at most, so a
+/// server that never ends it cannot keep the client (or the user) busy.
+const KEYBOARD_STEPS: u32 = 16;
+
 /// How to sign in.
 #[derive(Clone)]
 pub enum Identity {
@@ -413,11 +417,16 @@ async fn authenticate_keyboard_interactive(
         None => (vec![target.label()], 0),
     };
     let mut attempt = 1;
+    let mut steps = 0;
     while attempt <= KEYBOARD_ROUNDS {
         let mut reply = handle
             .authenticate_keyboard_interactive_start(target.user.as_str(), None)
             .await?;
         loop {
+            steps += 1;
+            if steps > KEYBOARD_STEPS {
+                return Ok(false);
+            }
             match reply {
                 KeyboardInteractiveAuthResponse::Success => return Ok(true),
                 KeyboardInteractiveAuthResponse::Failure {
