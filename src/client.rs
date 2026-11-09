@@ -155,9 +155,15 @@ impl Session {
     ) -> Result<Self, SshError> {
         let expanded = proxy::expand(command, target)?;
         let (stream, exit) = proxy::spawn(&expanded)?;
-        match Self::start(target, stream, config, reporter).await {
-            Ok(session) => Ok(session),
-            Err(error) => Err(exit.explain(error).await),
+        let start = Self::start(target, stream, config, reporter);
+        tokio::pin!(start);
+        tokio::select! {
+            biased;
+            result = &mut start => match result {
+                Ok(session) => Ok(session),
+                Err(error) => Err(exit.explain(error).await),
+            },
+            failure = exit.ended_early() => Err(failure),
         }
     }
 

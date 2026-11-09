@@ -20,6 +20,10 @@ const STDERR_TAIL: usize = 2048;
 /// failure counts as one of SSH rather than of the command.
 const EXIT_WAIT: Duration = Duration::from_secs(2);
 
+/// How long a dropped connection waits for the command to end by itself
+/// before killing it.
+const KILL_GRACE: Duration = Duration::from_secs(1);
+
 /// Replaces `%h` (host), `%p` (port), `%r` (user) and `%%` in `command`.
 ///
 /// Host and user are set into a command line without quoting, so they may
@@ -74,13 +78,14 @@ fn safe<'a>(what: &str, value: &'a str) -> Result<&'a str, SshError> {
 enum Ended {
     /// By itself, with the last of its error output.
     Exited { status: ExitStatus, stderr: String },
-    /// Killed because the connection was dropped.
+    /// Killed because the connection was dropped and it did not end within
+    /// [`KILL_GRACE`].
     Killed,
 }
 
 /// Starts `expanded` through the shell of the system: `/bin/sh -c "exec …"`
-/// on Unix, `cmd.exe /C …` on Windows. The returned stream reads its stdout
-/// and writes its stdin; dropping the stream kills the command.
+/// on Unix, `cmd.exe /S /C "…"` on Windows. The returned stream reads its
+/// stdout and writes its stdin; dropping the stream ends the command.
 pub(crate) fn spawn(expanded: &str) -> Result<(CommandStream, CommandExit), SshError> {
     let mut command = shell(expanded);
     command
@@ -88,7 +93,10 @@ pub(crate) fn spawn(expanded: &str) -> Result<(CommandStream, CommandExit), SshE
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn()?;
+    // The error names the shell, not the command.
+    let mut child = command
+        .spawn()
+        .map_err(|e| SshError::ProxyCommand(format!("the shell did not start: {e}")))?;
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
@@ -106,14 +114,18 @@ pub(crate) fn spawn(expanded: &str) -> Result<(CommandStream, CommandExit), SshE
             io: tokio::io::join(stdout, stdin),
             _kill: kill,
         },
-        CommandExit { ended },
+        CommandExit {
+            ended,
+            command: expanded.to_owned(),
+        },
     ))
 }
 
 #[cfg(unix)]
 fn shell(expanded: &str) -> Command {
     let mut command = Command::new("/bin/sh");
-    // `exec`, so the command itself is the child and gets the kill.
+    // `exec`, as OpenSSH does, so the command itself is the child and gets
+    // the kill.
     command.arg("-c").arg(format!("exec {expanded}"));
     command
 }
@@ -123,9 +135,10 @@ fn shell(expanded: &str) -> Command {
     /// No console window pops up for the command.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new("cmd.exe");
+    // With `/S`, cmd only strips the outer quotes added here and keeps those
+    // of the command, for example around `C:\Program Files\…`.
     command
-        .arg("/C")
-        .raw_arg(expanded)
+        .raw_arg(format!("/S /C \"{expanded}\""))
         .creation_flags(CREATE_NO_WINDOW);
     command
 }
@@ -149,8 +162,10 @@ async fn read_stderr(mut stderr: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
     }
 }
 
-/// Waits for the command to end, or kills it once the stream is dropped,
-/// and reaps it either way, so no zombie stays behind.
+/// Waits for the command to end, or ends it once the stream is dropped, and
+/// reaps it either way, so no zombie stays behind. A command that is ending
+/// by itself when the stream goes (it closed stdout and still writes its
+/// error) gets [`KILL_GRACE`], so its status counts.
 async fn watch_child(
     mut child: Child,
     killed: oneshot::Receiver<()>,
@@ -161,13 +176,14 @@ async fn watch_child(
     let status = tokio::select! {
         biased;
         status = child.wait() => status.ok(),
-        // The sender never sends: dropping it is the signal. A command that
-        // ended by itself just before still counts as ended.
-        _ = killed => child.try_wait().ok().flatten(),
+        // The sender never sends: dropping it is the signal.
+        _ = killed => tokio::time::timeout(KILL_GRACE, child.wait())
+            .await
+            .ok()
+            .and_then(Result::ok),
     };
     let Some(status) = status else {
-        // Already gone is fine.
-        child.kill().await.ok();
+        kill(&mut child).await;
         ended.send_replace(Some(Ended::Killed));
         return;
     };
@@ -182,9 +198,33 @@ async fn watch_child(
     ended.send_replace(Some(Ended::Exited { status, stderr }));
 }
 
+/// Kills the command. On Windows `cmd.exe` is the child and the command runs
+/// below it, so the whole tree goes.
+async fn kill(child: &mut Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        /// No console window pops up for `taskkill`.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Already gone is fine.
+        Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .await
+            .ok();
+    }
+    // Already gone is fine.
+    child.kill().await.ok();
+}
+
 /// The end of a started command, to explain a failed sign-in.
 pub(crate) struct CommandExit {
     ended: watch::Receiver<Option<Ended>>,
+    /// Kept out of every message.
+    command: String,
 }
 
 impl CommandExit {
@@ -192,24 +232,67 @@ impl CommandExit {
     /// with exit status and error output if the command ended by itself.
     /// Host key and sign-in decisions stay as they are: the command did its
     /// job there.
-    pub(crate) async fn explain(mut self, error: SshError) -> SshError {
+    pub(crate) async fn explain(&self, error: SshError) -> SshError {
         if !matches!(error, SshError::Io(_) | SshError::Ssh(_)) {
             return error;
         }
-        let ended = tokio::time::timeout(EXIT_WAIT, self.ended.wait_for(Option::is_some)).await;
-        let Ok(Ok(ended)) = ended else {
-            return error;
-        };
-        match ended.clone() {
-            Some(Ended::Exited { status, stderr }) if stderr.is_empty() => {
-                SshError::ProxyCommand(format!("ended with {status}"))
-            }
-            Some(Ended::Exited { status, stderr }) => {
-                SshError::ProxyCommand(format!("ended with {status}: {stderr}"))
-            }
-            Some(Ended::Killed) | None => error,
+        let mut ended = self.ended.clone();
+        let ended = tokio::time::timeout(EXIT_WAIT, ended.wait_for(Option::is_some)).await;
+        match ended {
+            Ok(Ok(ended)) => match ended.as_ref() {
+                Some(Ended::Exited { status, stderr }) => self.failure(*status, stderr),
+                Some(Ended::Killed) | None => error,
+            },
+            _ => error,
         }
     }
+
+    /// Waits until the command ended by itself and returns that as
+    /// [`SshError::ProxyCommand`]; never returns if it was killed. Raced
+    /// against the sign-in, so a command that ends while something else
+    /// (a process it started) still holds its stdout does not leave the
+    /// sign-in waiting.
+    pub(crate) async fn ended_early(&self) -> SshError {
+        let mut ended = self.ended.clone();
+        let failure = match ended.wait_for(Option::is_some).await {
+            Ok(ended) => match ended.as_ref() {
+                Some(Ended::Exited { status, stderr }) => Some(self.failure(*status, stderr)),
+                Some(Ended::Killed) | None => None,
+            },
+            Err(_) => None,
+        };
+        match failure {
+            Some(failure) => failure,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn failure(&self, status: ExitStatus, stderr: &str) -> SshError {
+        let stderr = redact(stderr, &self.command);
+        if stderr.is_empty() {
+            SshError::ProxyCommand(format!("ended with {status}"))
+        } else {
+            SshError::ProxyCommand(format!("ended with {status}: {stderr}"))
+        }
+    }
+}
+
+/// Words of a command at least this long are taken for secrets (tokens,
+/// keys) and kept out of the error output.
+const SECRET_WORD: usize = 16;
+
+/// `stderr` without the command: a shell repeats the whole line on a syntax
+/// error, and it may carry an access token. Long words of the command go as
+/// well, also where only part of the line is repeated.
+fn redact(stderr: &str, command: &str) -> String {
+    let mut text = stderr.replace(command, "<command>");
+    for word in command
+        .split_whitespace()
+        .filter(|word| word.len() >= SECRET_WORD)
+    {
+        text = text.replace(word, "…");
+    }
+    text
 }
 
 /// stdout and stdin of a running command as one stream. Dropping it kills
@@ -290,6 +373,18 @@ mod tests {
         assert!(refused("nc %h %", &t).contains('%'));
         refused("", &t);
         refused("   ", &t);
+    }
+
+    #[test]
+    fn error_output_never_repeats_the_command() {
+        let command = "cloudflared access ssh --token abcdefghijklmnopqrstuvwxyz (";
+        let stderr = format!("/bin/sh: -c: line 0: `exec {command}'");
+        let redacted = redact(&stderr, command);
+        assert!(!redacted.contains("abcdefghijklmnop"), "{redacted}");
+        assert!(redacted.contains("line 0"), "{redacted}");
+        // Only part of the line repeated: the long word still goes.
+        let partial = redact("token abcdefghijklmnopqrstuvwxyz rejected", command);
+        assert_eq!(partial, "token … rejected");
     }
 
     #[test]

@@ -832,13 +832,7 @@ impl SessionPool {
                 }
             };
             session.map_err(|e| {
-                let failure = match &e {
-                    // The command did not start.
-                    SshError::Io(_) if proxy.is_some() && below.is_none() => {
-                        HopFailure::ProxyCommand
-                    }
-                    _ => HopFailure::from(&e),
-                };
+                let failure = HopFailure::from(&e);
                 (e, failure)
             })
         };

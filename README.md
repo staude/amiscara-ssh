@@ -140,10 +140,10 @@ let session = pool.connect(&route).await?;
 
 - Platzhalter wie in OpenSSH: `%h` Host, `%p` Port, `%r` Benutzer, `%%` ein `%`. Ein anderer Platzhalter oder ein einzelnes `%` am Ende endet vor dem Start in `SshError::ProxyCommand`.
 - Host und Benutzer kommen ungeschützt in die Befehlszeile. Sie dürfen deshalb nur aus ASCII-Buchstaben, Ziffern und `. - _ : @` bestehen und nicht mit `-` beginnen, sonst lehnt das Crate vor dem Start ab. So kann ein Eintrag in einem geteilten Dokument keine fremden Befehle einschleusen.
-- Der Befehl läuft auf Unix als `/bin/sh -c "exec <Befehl>"` (wie OpenSSH), auf Windows als `cmd.exe /C <Befehl>` ohne Konsolenfenster.
-- Endet der Befehl vor der Anmeldung, nennt `SshError::ProxyCommand` seinen Exit-Status und die letzten 2 KiB seiner Fehlerausgabe, nie den Befehl selbst (er kann ein Zugangs-Token enthalten); im Ereignis steht `HopFailure::ProxyCommand`. Host-Key- und Anmeldefehler bleiben, was sie sind. Auch `Debug` von `Route` zeigt den Befehl nicht.
+- Der Befehl läuft auf Unix als `/bin/sh -c "exec <Befehl>"` (wie OpenSSH), auf Windows als `cmd.exe /S /C "<Befehl>"` ohne Konsolenfenster, Anführungszeichen im Befehl (etwa um `C:\Program Files\…`) bleiben erhalten.
+- Endet der Befehl vor der Anmeldung, nennt `SshError::ProxyCommand` seinen Exit-Status und die letzten 2 KiB seiner Fehlerausgabe, nie den Befehl selbst (er kann ein Zugangs-Token enthalten): Wiederholt die Fehlerausgabe ihn, etwa die Shell bei einem Syntaxfehler, steht dort `<command>`, Wörter des Befehls ab 16 Zeichen werden zu `…`. Das gilt auch, wenn der Befehl endet, während ein von ihm gestarteter Prozess stdout noch offen hält. Im Ereignis steht `HopFailure::ProxyCommand`. Host-Key- und Anmeldefehler bleiben, was sie sind. Auch `Debug` von `Route` zeigt den Befehl nicht.
 - Im Pool darf der Aufbau des ersten Sprungs über einen Befehl bis zu `PoolConfig::proxy_connect_timeout` dauern (120 s), weil etwa `cloudflared` beim ersten Mal auf die Anmeldung im Browser wartet. `Session::connect_command` hat wie `Session::connect` kein eigenes Zeitlimit.
-- Endet die Verbindung, beendet das Crate den Befehl.
+- Endet die Verbindung, beendet das Crate den Befehl; endet er nicht binnen einer Sekunde von selbst, wird er abgeschossen, auf Windows samt allem, was unter `cmd.exe` läuft.
 
 ## SFTP
 
