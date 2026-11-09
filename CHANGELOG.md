@@ -4,6 +4,17 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+### Added
+
+- ProxyCommand: `Session::connect_command` startet einen lokalen Befehl (auf Unix `/bin/sh -c "exec …"`, auf Windows `cmd.exe /C`) und führt die Verbindung über dessen stdin und stdout; `Route::proxy_command` tut das für den ersten Sprung einer Kette. Platzhalter `%h`, `%p`, `%r` und `%%` wie in OpenSSH; ein unbekannter Platzhalter und ein Host oder Benutzer mit Zeichen, die in einer Befehlszeile gefährlich sind, werden vor dem Start abgelehnt. Endet der Befehl vor der Anmeldung, nennt der Fehler Exit-Status und Fehlerausgabe, nie den Befehl. Endet die Verbindung, endet auch der Befehl (staude/amiscara-connect#28).
+- `PoolConfig::proxy_connect_timeout` (120 s) als Zeitgrenze für einen ersten Sprung über einen Befehl.
+- Tests: Befehl, der vor der Anmeldung endet (ohne Container, alle Systeme), Sitzung und Pool über `nc %h %p`, Ende des Befehls nach dem Drop, Bastion über einen Befehl in der Testkette.
+
+### Changed
+
+- Neue Varianten `SshError::ProxyCommand` und `HopFailure::ProxyCommand`, neue Felder `Route::proxy_command` und `PoolConfig::proxy_connect_timeout`; wer `Route` selbst aufbaut, ergänzt `proxy_command: None` (oder nutzt `Route::direct`), bei `PoolConfig` `..PoolConfig::default()`. `Debug` von `Route` zeigt den Befehl nicht.
+- Der Testserver der Container-Tests lässt parallele Anmeldungen zu (`MaxStartups 100`) und bestraft die Quelle nach dem absichtlich falschen Passwort nicht mehr (`PerSourcePenalties no`); vorher brach sshd parallele Tests gelegentlich mit `Disconnect` ab.
+
 ## [0.5.0] - 2026-11-09
 
 ### Added

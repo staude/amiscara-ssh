@@ -93,6 +93,7 @@ fn chain() -> Route {
     Route {
         jumps: vec![bastion(), jump()],
         target: target(),
+        proxy_command: None,
     }
 }
 
@@ -207,6 +208,7 @@ fn otp_chain(prompter: &Arc<Prompter>) -> Route {
     Route {
         jumps: vec![otp_bastion(prompter), jump()],
         target: target(),
+        proxy_command: None,
     }
 }
 
@@ -511,6 +513,7 @@ async fn agent_reaches_only_the_target_and_only_when_on() -> TestResult {
     let to_jump = Route {
         jumps: vec![bastion()],
         target: jump(),
+        proxy_command: None,
     };
     let jump = pool.connect(&to_jump).await?;
     assert_eq!(
@@ -834,5 +837,28 @@ async fn waiting_for_the_code_does_not_count_towards_the_limit() -> TestResult {
     let prompter = Prompter::with(Answer::Code, None, Duration::from_secs(3));
     let lease = pool.connect(&otp_chain(&prompter)).await?;
     shell_line(&lease, "hostname", "target").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn bastion_over_a_command_reaches_the_target() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let route = Route {
+        proxy_command: Some("nc %h %p".into()),
+        ..chain()
+    };
+    let lease = pool.connect(&route).await?;
+    let seen = drain(&mut events);
+    for index in 0..3 {
+        assert!(
+            states_of(&seen, index).iter().any(|state| connected(state)),
+            "{seen:?}"
+        );
+    }
+    shell_line(&lease, "hostname", "target").await?;
+    drop(lease);
+    wait_closed(&mut events, &[0, 1, 2], Duration::from_secs(10)).await?;
     Ok(())
 }

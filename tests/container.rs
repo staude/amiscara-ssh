@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use amiscara_ssh::{
-    HostKeyPolicy, Identity, PtySize, Session, Shell, ShellEvent, SshError, SshTarget, Zeroizing,
-    keys,
+    ChannelMsg, HopState, HostKeyPolicy, Identity, PoolConfig, PtySize, Route, Session,
+    SessionPool, Shell, ShellEvent, SshError, SshTarget, Zeroizing, keys,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -277,5 +277,106 @@ async fn sftp_creates_writes_reads_renames_and_removes() -> TestResult {
     assert!(!sftp.try_exists(base.as_str()).await?);
     sftp.close().await?;
     session.disconnect().await?;
+    Ok(())
+}
+
+/// Runs `command` on a session channel and returns its output.
+async fn exec(session: &Session, command: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let mut channel = session.channel_session().await?;
+    channel.exec(true, command).await?;
+    let mut output = Vec::new();
+    let read = async {
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => output.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { .. } | ChannelMsg::Eof => break,
+                _ => {}
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), read).await?;
+    Ok(String::from_utf8_lossy(&output).trim().to_owned())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn proxy_command_carries_the_session() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let session = Session::connect_command("nc %h %p", &target(key_identity(), tofu(&dir))).await?;
+    assert_eq!(exec(&session, "echo ok").await?, "ok");
+    session.disconnect().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn pool_route_over_a_command_is_shared() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let route = Route {
+        proxy_command: Some("nc %h %p".into()),
+        ..Route::direct(target(key_identity(), tofu(&dir)))
+    };
+    let first = pool.connect(&route).await?;
+    let second = pool.connect(&route).await?;
+    let mut states = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        states.push(event.state);
+    }
+    assert!(
+        matches!(
+            states.as_slice(),
+            [
+                HopState::Connecting,
+                HopState::Connected { .. },
+                HopState::Reused
+            ]
+        ),
+        "{states:?}"
+    );
+    assert_eq!(exec(&second, "echo ok").await?, "ok");
+
+    // The same server over TCP is another connection.
+    let over_tcp = pool
+        .connect(&Route::direct(target(key_identity(), tofu(&dir))))
+        .await?;
+    let state = events.try_recv()?.state;
+    assert_eq!(state, HopState::Connecting);
+    drop((first, second, over_tcp));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn dropped_connection_ends_the_command() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let pid_file = dir.path().join("pid");
+    let command = format!("sh -c 'echo $$ > {}; exec nc %h %p'", pid_file.display());
+    let pool = SessionPool::new(PoolConfig::default());
+    let route = Route {
+        proxy_command: Some(command),
+        ..Route::direct(target(key_identity(), tofu(&dir)))
+    };
+    let lease = pool.connect(&route).await?;
+    let pid = std::fs::read_to_string(&pid_file)?.trim().to_owned();
+    let alive = |pid: &str| {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+    };
+    assert!(alive(&pid)?, "command not running while leased");
+
+    drop(lease);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while alive(&pid)? {
+        if tokio::time::Instant::now() > deadline {
+            return Err(format!("command {pid} still runs 2 s after the drop").into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     Ok(())
 }
