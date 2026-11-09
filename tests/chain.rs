@@ -5,17 +5,21 @@
 //! scripts/ssh-testkette.sh run
 //! ```
 //!
-//! Index 0 is the bastion, 1 the jump, 2 the target. The tests stop and start
-//! the jump container, so they run one at a time (`--test-threads=1`).
+//! Index 0 is the bastion, 1 the jump, 2 the target. The second bastion,
+//! `otp-bastion`, wants a one-time code after the key, so its routes ask the
+//! test's prompter. The tests stop and start containers, so they run one at a
+//! time (`--test-threads=1`).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use amiscara_ssh::{
-    HopEvent, HopFailure, HopState, HostKeyPolicy, Identity, PoolConfig, PtySize, Route, Session,
-    SessionPool, ShellEvent, SshError, SshTarget, Zeroizing, keys,
+    HopEvent, HopFailure, HopState, HostKeyPolicy, Identity, KeyboardAnswer, KeyboardInteractive,
+    KeyboardPrompt, PoolConfig, PromptFuture, PtySize, Route, Session, SessionPool, ShellEvent,
+    SshError, SshTarget, Zeroizing, keys,
 };
 use tokio::sync::broadcast;
 
@@ -30,6 +34,13 @@ fn port() -> u16 {
         .ok()
         .and_then(|port| port.parse().ok())
         .unwrap_or(2223)
+}
+
+fn otp_port() -> u16 {
+    std::env::var("AMISCARA_SSH_OTP_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(2224)
 }
 
 fn strict() -> HostKeyPolicy {
@@ -47,6 +58,7 @@ fn bastion() -> SshTarget {
         identity: Identity::Password(Zeroizing::new("bastion-pw".into())),
         host_key: strict(),
         agent_forward: false,
+        keyboard_interactive: None,
     }
 }
 
@@ -61,6 +73,7 @@ fn jump() -> SshTarget {
         },
         host_key: strict(),
         agent_forward: false,
+        keyboard_interactive: None,
     }
 }
 
@@ -72,6 +85,7 @@ fn target() -> SshTarget {
         identity: Identity::Agent,
         host_key: strict(),
         agent_forward: false,
+        keyboard_interactive: None,
     }
 }
 
@@ -79,6 +93,138 @@ fn chain() -> Route {
     Route {
         jumps: vec![bastion(), jump()],
         target: target(),
+    }
+}
+
+/// The current code of the bastion with one-time code.
+fn totp() -> Result<String, Box<dyn std::error::Error>> {
+    let secret = std::fs::read_to_string(state().join("totp_secret"))?;
+    let secret = totp_rs::Secret::try_from_base32(secret.trim())?;
+    // 80 bits are too short for the RFC check, but what the bastion uses.
+    let totp = totp_rs::Builder::new()
+        .with_secret(secret)
+        .build_noncompliant();
+    Ok(totp.generate_current().to_string())
+}
+
+/// How the test prompter answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// The current code.
+    Code,
+    /// A wrong code first, then the current one.
+    WrongThenCode,
+    /// Cancels the question.
+    Cancel,
+    /// Never answers.
+    Hang,
+}
+
+/// A prompter that answers like a user typing the code and remembers every
+/// question.
+#[derive(Debug)]
+struct Prompter {
+    answer: Answer,
+    keep_open: Option<Duration>,
+    delay: Duration,
+    asked: Mutex<Vec<KeyboardPrompt>>,
+}
+
+impl Prompter {
+    fn new(answer: Answer) -> Arc<Self> {
+        Self::with(answer, None, Duration::ZERO)
+    }
+
+    fn with(answer: Answer, keep_open: Option<Duration>, delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            keep_open,
+            delay,
+            asked: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn asked(&self) -> Vec<KeyboardPrompt> {
+        self.asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl KeyboardInteractive for Prompter {
+    fn ask(&self, prompt: KeyboardPrompt) -> PromptFuture {
+        let count = {
+            let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+            asked.push(prompt);
+            asked.len()
+        };
+        let code = match self.answer {
+            Answer::Cancel => None,
+            Answer::Hang => return Box::pin(std::future::pending()),
+            Answer::Code => totp().ok(),
+            Answer::WrongThenCode if count == 1 => totp().ok().map(|code| {
+                // Shifted by one in every digit: never a code of the window.
+                code.chars()
+                    .map(|c| {
+                        c.to_digit(10)
+                            .map_or(c, |d| char::from(b'0' + ((d + 1) % 10) as u8))
+                    })
+                    .collect()
+            }),
+            Answer::WrongThenCode => totp().ok(),
+        };
+        let keep_open = self.keep_open;
+        let delay = self.delay;
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            code.map(|code| KeyboardAnswer {
+                responses: vec![Zeroizing::new(code)],
+                keep_open,
+            })
+        })
+    }
+}
+
+fn otp_bastion(prompter: &Arc<Prompter>) -> SshTarget {
+    let prompter: Arc<dyn KeyboardInteractive> = Arc::clone(prompter) as _;
+    SshTarget {
+        host: "127.0.0.1".into(),
+        port: otp_port(),
+        user: "otp-user".into(),
+        identity: Identity::File {
+            path: state().join("id_otp"),
+            passphrase: None,
+        },
+        host_key: strict(),
+        agent_forward: false,
+        keyboard_interactive: Some(prompter),
+    }
+}
+
+/// otp-bastion -> jump -> target.
+fn otp_chain(prompter: &Arc<Prompter>) -> Route {
+    Route {
+        jumps: vec![otp_bastion(prompter), jump()],
+        target: target(),
+    }
+}
+
+/// Connects until the containers are back after a restart.
+async fn connect_retrying(
+    pool: &SessionPool,
+    route: &Route,
+) -> Result<amiscara_ssh::Lease, SshError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match pool.connect(route).await {
+            Ok(lease) => return Ok(lease),
+            Err(err) if tokio::time::Instant::now() < deadline && !err.needs_user() => {
+                eprintln!("noch nicht bereit: {err}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
@@ -477,5 +623,216 @@ async fn agent_channel_is_refused_when_off() -> TestResult {
     // sshd's socket is there, but the refused channel yields no keys (1);
     // an accepted one would list the key in the local agent (0).
     assert!(text.lines().any(|line| line.trim() == "agent=1"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn one_time_code_is_asked_once_and_only_for_the_bastion() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let prompter = Prompter::new(Answer::Code);
+    let route = otp_chain(&prompter);
+    let lease = pool.connect(&route).await?;
+
+    let asked = prompter.asked();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let prompt = &asked[0];
+    assert_eq!(prompt.index, 0);
+    assert_eq!(prompt.route, route.labels());
+    assert_eq!(prompt.route.len(), 3);
+    assert_eq!(
+        prompt.route[0],
+        format!("otp-user@127.0.0.1:{}", otp_port())
+    );
+    assert_eq!(prompt.attempt, 1);
+    assert_eq!(prompt.prompts.len(), 1, "{prompt:?}");
+    assert!(!prompt.prompts[0].echo, "{prompt:?}");
+
+    let seen = drain(&mut events);
+    let waiting: Vec<usize> = seen
+        .iter()
+        .filter(|(_, state)| *state == HopState::AwaitingInput)
+        .map(|(index, _)| *index)
+        .collect();
+    assert_eq!(waiting, vec![0], "{seen:?}");
+    shell_line(&lease, "hostname", "target").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn kept_open_bastion_needs_no_new_code_until_its_time_is_up() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let prompter = Prompter::with(Answer::Code, Some(Duration::from_secs(3)), Duration::ZERO);
+    let route = otp_chain(&prompter);
+
+    let lease = pool.connect(&route).await?;
+    drain(&mut events);
+    drop(lease);
+    let seen = wait_closed(&mut events, &[1, 2], Duration::from_secs(10)).await?;
+    assert!(states_of(&seen, 0).is_empty(), "bastion closed: {seen:?}");
+
+    let again = pool.connect(&route).await?;
+    let seen = drain(&mut events);
+    assert_eq!(states_of(&seen, 0), vec![&HopState::Reused], "{seen:?}");
+    assert_eq!(prompter.asked().len(), 1, "asked again within the time");
+    shell_line(&again, "hostname", "target").await?;
+
+    drop(again);
+    let dropped = Instant::now();
+    wait_closed(&mut events, &[0], Duration::from_secs(10)).await?;
+    let waited = dropped.elapsed();
+    assert!(
+        waited >= Duration::from_millis(2500),
+        "closed after {waited:?}"
+    );
+
+    let after = pool.connect(&route).await?;
+    assert_eq!(prompter.asked().len(), 2, "no new code after the time");
+    drop(after);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn without_grace_all_close_and_close_idle_ends_the_wait() -> TestResult {
+    let config = PoolConfig {
+        code_grace: Duration::ZERO,
+        ..PoolConfig::default()
+    };
+    let pool = SessionPool::new(config);
+    let mut events = pool.subscribe();
+    let prompter = Prompter::new(Answer::Code);
+    let lease = pool.connect(&otp_chain(&prompter)).await?;
+    drain(&mut events);
+    drop(lease);
+    wait_closed(&mut events, &[0, 1, 2], Duration::from_secs(10)).await?;
+
+    // With the default grace the bastion waits, until close_idle.
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let lease = pool.connect(&otp_chain(&prompter)).await?;
+    drain(&mut events);
+    drop(lease);
+    let seen = wait_closed(&mut events, &[1, 2], Duration::from_secs(10)).await?;
+    assert!(states_of(&seen, 0).is_empty(), "bastion closed: {seen:?}");
+    assert_eq!(pool.close_idle(), 1);
+    wait_closed(&mut events, &[0], Duration::from_secs(5)).await?;
+    assert_eq!(pool.close_idle(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn cancelled_code_leaves_nothing_open_and_the_next_try_asks_again() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+
+    let cancel = Prompter::new(Answer::Cancel);
+    match pool.connect(&otp_chain(&cancel)).await {
+        Err(SshError::Hop { index, source, .. }) => {
+            assert_eq!(index, 0);
+            assert!(matches!(*source, SshError::Cancelled(_)), "{source}");
+        }
+        Err(other) => return Err(format!("expected Hop 0, got {other}").into()),
+        Ok(_) => return Err("connected without a code".into()),
+    }
+    let seen = drain(&mut events);
+    assert!(
+        seen.contains(&(0, HopState::Failed(HopFailure::Cancelled))),
+        "{seen:?}"
+    );
+    assert_eq!(pool.close_idle(), 0, "something stayed in the pool");
+
+    // The app gives up while the question is open.
+    let hang = Prompter::new(Answer::Hang);
+    let given_up =
+        tokio::time::timeout(Duration::from_secs(1), pool.connect(&otp_chain(&hang))).await;
+    assert!(given_up.is_err(), "the hanging question ended by itself");
+    assert_eq!(hang.asked().len(), 1);
+    assert_eq!(pool.close_idle(), 0, "something stayed in the pool");
+
+    let code = Prompter::new(Answer::Code);
+    let lease = pool.connect(&otp_chain(&code)).await?;
+    assert_eq!(code.asked().len(), 1);
+    shell_line(&lease, "hostname", "target").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn behind_a_kept_bastion_only_the_rest_is_rebuilt() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let prompter = Prompter::new(Answer::Code);
+    let route = otp_chain(&prompter);
+    let old = pool.connect(&route).await?;
+    drain(&mut events);
+
+    // The jump behind the bastion goes away.
+    compose(&["kill", "jump"])?;
+    let closed = wait_closed(&mut events, &[1, 2], Duration::from_secs(30)).await;
+    compose(&["start", "jump"])?;
+    let closed = closed?;
+    assert!(states_of(&closed, 0).is_empty(), "{closed:?}");
+    drop(old);
+
+    drain(&mut events);
+    let new = connect_retrying(&pool, &route).await?;
+    let seen = drain(&mut events);
+    assert!(
+        states_of(&seen, 0).iter().all(|s| **s == HopState::Reused),
+        "{seen:?}"
+    );
+    assert_eq!(prompter.asked().len(), 1, "a new code for the old bastion");
+    shell_line(&new, "hostname", "target").await?;
+    drop(new);
+
+    // The bastion itself restarts: exactly one new code.
+    compose(&["restart", "otp-bastion"])?;
+    wait_closed(&mut events, &[0], Duration::from_secs(30)).await?;
+    let after = connect_retrying(&pool, &route).await?;
+    assert_eq!(prompter.asked().len(), 2, "{:?}", prompter.asked());
+    shell_line(&after, "hostname", "target").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn wrong_code_can_be_typed_again_on_the_same_connection() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let prompter = Prompter::new(Answer::WrongThenCode);
+    let lease = pool.connect(&otp_chain(&prompter)).await?;
+    let attempts: Vec<u32> = prompter.asked().iter().map(|p| p.attempt).collect();
+    assert_eq!(attempts, vec![1, 2]);
+    let seen = drain(&mut events);
+    // One connection: a single Connecting for the bastion.
+    let bastion = states_of(&seen, 0);
+    assert_eq!(
+        bastion
+            .iter()
+            .filter(|s| ***s == HopState::Connecting)
+            .count(),
+        1,
+        "{seen:?}"
+    );
+    shell_line(&lease, "hostname", "target").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn waiting_for_the_code_does_not_count_towards_the_limit() -> TestResult {
+    let config = PoolConfig {
+        connect_timeout: Duration::from_secs(2),
+        ..PoolConfig::default()
+    };
+    let pool = SessionPool::new(config);
+    let prompter = Prompter::with(Answer::Code, None, Duration::from_secs(3));
+    let lease = pool.connect(&otp_chain(&prompter)).await?;
+    shell_line(&lease, "hostname", "target").await?;
     Ok(())
 }

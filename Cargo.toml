@@ -24,11 +24,12 @@ russh = "0.64.1"
 russh-sftp = "3.0.1"
 ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["ed25519", "getrandom"] }
 thiserror = "2.0.21"
-tokio = { version = "1.53.3", features = ["net", "io-util", "time", "sync", "rt", "fs"] }
+tokio = { version = "1.53.3", features = ["net", "io-util", "time", "sync", "rt", "fs", "macros"] }
 zeroize = "1"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+totp-rs = "6"
 tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread"] }
 
 [lints]

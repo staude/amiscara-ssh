@@ -4,6 +4,19 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+### Added
+
+- Einmalcodes per keyboard-interactive: `SshTarget::keyboard_interactive` nimmt ein `KeyboardInteractive`, das die Fragen des Servers als `KeyboardPrompt` bekommt (Weg, Index des fragenden Sprungs, Fragen mit `echo`, Versuch) und mit `KeyboardAnswer` oder `None` für Abbruch antwortet. Gefragt wird nur, wenn der Server Schlüssel, Agent oder Passwort als Teilerfolg angenommen hat und danach noch keyboard-interactive verlangt, nie nach einer Ablehnung; ein abgelehnter Code wird auf derselben Verbindung neu erfragt, höchstens drei Versuche (staude/amiscara-connect#26).
+- `HopState::AwaitingInput` während der Frage; die Wartezeit zählt nicht zu `PoolConfig::connect_timeout` und nicht zur Latenz.
+- Offenhalten im Pool: Ein Sprung, der gefragt hat, bleibt nach der letzten `Lease` offen, so lange wie `KeyboardAnswer::keep_open` sagt, sonst `PoolConfig::code_grace` (60 s). `SessionPool::close_idle` schließt alle ungenutzten Verbindungen sofort.
+- Testkette mit `otp-bastion` (Schlüssel, dann TOTP-Code über PAM) und Tests für Frage, Offenhalten, Abbruch, Neuaufbau hinter der Bastion, Neustart der Bastion, falschen Code und Zeitgrenze.
+
+### Changed
+
+- `SshTarget` hat das neue Feld `keyboard_interactive`, `PoolConfig` das Feld `code_grace`; wer sie selbst aufbaut, ergänzt `keyboard_interactive: None` bzw. `..PoolConfig::default()`.
+- Neue Varianten `SshError::Cancelled`, `HopState::AwaitingInput` und `HopFailure::Cancelled`; wer vollständig darauf matcht, ergänzt sie. `SshError::Cancelled` zählt zu `needs_user`.
+- Mit dem Agent zählt ein Schlüssel, den der Server nur als Teilerfolg annimmt, jetzt als Anmeldung mit Rest, statt die übrigen Schlüssel zu probieren.
+
 ## [0.4.0] - 2026-11-07
 
 ### Added

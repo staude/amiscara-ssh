@@ -2,14 +2,14 @@
 
 Gemeinsamer SSH-Client der Amiscara-Apps ([Amiscara Connect](https://github.com/staude/amiscara-connect) und [Amiscara Agents](https://github.com/staude/amiscara-agents)), gebaut auf [russh](https://github.com/Eugeny/russh).
 
-Ins Crate gehört alles, was nur SSH ist: Verbindungsaufbau und Anmeldung, Host-Key-Prüfung mit TOFU, Schlüssel, Kanäle für Shell mit PTY, `direct-tcpip` und `direct-streamlocal`, Jump-Host-Ketten mit Sitzungs-Pool und Agent-Forwarding, SFTP über `Session::open_sftp`. Was zu einer App gehört, bleibt in der App.
+Ins Crate gehört alles, was nur SSH ist: Verbindungsaufbau und Anmeldung, Host-Key-Prüfung mit TOFU, Schlüssel, Kanäle für Shell mit PTY, `direct-tcpip` und `direct-streamlocal`, Jump-Host-Ketten mit Sitzungs-Pool und Agent-Forwarding, Einmalcodes per keyboard-interactive, SFTP über `Session::open_sftp`. Was zu einer App gehört, bleibt in der App.
 
 ## Einbinden
 
 Die Apps binden das Crate als Git-Abhängigkeit mit festem Tag ein:
 
 ```toml
-amiscara-ssh = { git = "https://github.com/staude/amiscara-ssh", tag = "v0.4.0" }
+amiscara-ssh = { git = "https://github.com/staude/amiscara-ssh", tag = "v0.5.0" }
 ```
 
 Wer Crate und App zugleich ändert, setzt in der App lokal eine nicht eingecheckte `.cargo/config.toml`:
@@ -32,7 +32,7 @@ amiscara-ssh = { path = "../amiscara-ssh" }
   ```
 
   Der Server läuft auf `127.0.0.1:2222` (anderer Port über `AMISCARA_SSH_TEST_PORT`), Nutzer `tester`, Schlüssel in `target/ssh-testserver/`. Tests laufen nie gegen fremde oder produktive Server.
-- Tests gegen die Jump-Host-Kette (braucht Docker): `scripts/ssh-testkette.sh run` startet Bastion, Jump und Ziel als Container, einen eigenen `ssh-agent` mit dem Testschlüssel, führt `cargo test --test chain -- --ignored` aus und baut alles wieder ab, auch bei Fehlern. Nur die Bastion ist erreichbar, auf `127.0.0.1:2223` (anderer Port über `AMISCARA_SSH_CHAIN_PORT`); jeder Sprung hat eigenen Benutzer, eigene Zugangsdaten und eigenen Host-Key, alles in `target/ssh-testkette/`. `start` und `stop` gibt es auch einzeln.
+- Tests gegen die Jump-Host-Kette (braucht Docker): `scripts/ssh-testkette.sh run` startet Bastion, Jump und Ziel als Container, einen eigenen `ssh-agent` mit dem Testschlüssel, führt `cargo test --test chain -- --ignored` aus und baut alles wieder ab, auch bei Fehlern. Von außen erreichbar sind nur die Bastionen, die Bastion mit Passwort auf `127.0.0.1:2223` (anderer Port über `AMISCARA_SSH_CHAIN_PORT`); jeder Sprung hat eigenen Benutzer, eigene Zugangsdaten und eigenen Host-Key, alles in `target/ssh-testkette/`. Daneben läuft `otp-bastion` auf `127.0.0.1:2224` (anderer Port über `AMISCARA_SSH_OTP_PORT`), eine Bastion, die nach dem Schlüssel `id_otp` per keyboard-interactive einen TOTP-Code verlangt (Geheimnis in `target/ssh-testkette/totp_secret`); dahinter dieselben Jump und Ziel. `start` und `stop` gibt es auch einzeln.
 
 ## Beispiel
 
@@ -50,6 +50,7 @@ let target = SshTarget {
         accept_new: true,
     },
     agent_forward: false,
+    keyboard_interactive: None,
 };
 let session = Session::connect(&target).await?;
 let mut shell = session.open_shell("xterm-256color", PtySize { cols: 80, rows: 24 }).await?;
@@ -83,6 +84,42 @@ while let Ok(event) = events.try_recv() {
 - `agent_forward: true` am Ziel gibt Shells dort den lokalen SSH-Agent. Sprünge bekommen ihn nie, auch wenn ihr `SshTarget` es verlangt.
 - Eine `Lease` gibt man durch Fallenlassen zurück, nicht mit `disconnect()`: das schlösse die geteilte Verbindung für alle. Auch ein abgebrochenes `connect` hinterlässt nichts im Pool.
 - Der Pool-Schlüssel ist der Weg aus Host, Port und Benutzer je Sprung (beim Ziel auch `agent_forward`). Zugangsdaten und Host-Key-Regel gehören nicht dazu: Eine lebende Verbindung wird so weiterbenutzt, wie sie angemeldet und geprüft wurde.
+
+## Einmalcodes
+
+Will ein Server bei der Anmeldung etwas wissen, etwa eine Bastion nach dem Schlüssel einen Einmalcode, fragt das Crate per keyboard-interactive die App: `SshTarget::keyboard_interactive` nimmt ein `Arc<dyn KeyboardInteractive>`. Gefragt wird nur der Sprung, der fragt, und nur wenn der Server die `Identity` als Teilerfolg angenommen hat und danach noch keyboard-interactive verlangt. Abgelehnte Schlüssel oder Passwörter bleiben eine Ablehnung (`SshError::AuthFailed`), ohne Frage; ein Server, der nur keyboard-interactive anbietet, wird nicht unterstützt.
+
+```rust
+use std::sync::Arc;
+use amiscara_ssh::{KeyboardAnswer, KeyboardInteractive, KeyboardPrompt, PromptFuture, Zeroizing};
+
+#[derive(Debug)]
+struct Dialog; // in der App: Rückfrage an die Oberfläche
+
+impl KeyboardInteractive for Dialog {
+    fn ask(&self, prompt: KeyboardPrompt) -> PromptFuture {
+        // prompt.route[prompt.index] ist der fragende Sprung, prompt.route der Weg,
+        // prompt.prompts die Fragen (echo false: verdeckt eingeben), prompt.attempt ab 1
+        Box::pin(async move {
+            let code = String::from("123456"); // vom Nutzer
+            Some(KeyboardAnswer {
+                responses: vec![Zeroizing::new(code)],
+                keep_open: None, // Häkchen "offen halten": Some(Duration::from_secs(600))
+            })
+        })
+    }
+}
+
+// bastion ist ein SshTarget wie oben
+bastion.keyboard_interactive = Some(Arc::new(Dialog));
+```
+
+- Während der Frage meldet der Sprung `HopState::AwaitingInput`. Die Wartezeit zählt nicht zu `PoolConfig::connect_timeout` und nicht zur Latenz.
+- `None` als Antwort bricht ab: `SshError::Cancelled`, im Ereignis `HopFailure::Cancelled`. Vom fragenden Sprung bleibt nichts im Pool, auch nicht bei einem fallengelassenen `connect` während der Frage; ein Sprung davor, der schon einen Code bekommen hat, bleibt wie nach der letzten `Lease` offen.
+- Ein abgelehnter Code wird auf derselben Verbindung neu erfragt, höchstens drei Versuche (`attempt` 1 bis 3), danach `SshError::AuthFailed`. Verlangt der Server mehrere Schritte per keyboard-interactive nacheinander, bleibt `attempt` beim nächsten Schritt gleich. Mehr als 16 Anfragen und Schritte in einer Anmeldung lehnt das Crate ab (`SshError::AuthFailed`).
+- Die Wartezeit begrenzt der Server selbst (OpenSSH `LoginGraceTime`, meist 120 s); antwortet der Nutzer später, endet der Aufbau mit `HopFailure::Closed`.
+- Der Pool hält einen Sprung, der gefragt hat, nach der letzten `Lease` noch offen: `keep_open` der Antwort, sonst `PoolConfig::code_grace` (60 s). In dieser Zeit braucht eine neue Sitzung keinen Code, auch nicht nach einem Fehler weiter hinten, etwa einer Host-Key-Bestätigung. `SessionPool::close_idle` schließt alle ungenutzten Verbindungen sofort, etwa beim Sperren der App. Schließt die Bastion ungenutzte Verbindungen selbst (OpenSSH `UnusedConnectionTimeout`), endet das Offenhalten früher. Offengehalten wird nur, wenn die letzte `Lease` in einer Tokio-Runtime fallengelassen wird; außerhalb davon (etwa auf einem fremden Thread) schließt der Sprung sofort.
+- russh kopiert die Antworten beim Senden in einfache `String`s; nur die Kopien in `KeyboardAnswer` werden beim Drop gelöscht.
 
 ## SFTP
 
