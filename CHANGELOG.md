@@ -4,6 +4,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-09
+
 ### Added
 
 - Einmalcodes per keyboard-interactive: `SshTarget::keyboard_interactive` nimmt ein `KeyboardInteractive`, das die Fragen des Servers als `KeyboardPrompt` bekommt (Weg, Index des fragenden Sprungs, Fragen mit `echo`, Versuch) und mit `KeyboardAnswer` oder `None` für Abbruch antwortet. Gefragt wird nur, wenn der Server Schlüssel, Agent oder Passwort als Teilerfolg angenommen hat und danach noch keyboard-interactive verlangt, nie nach einer Ablehnung; ein abgelehnter Code wird auf derselben Verbindung neu erfragt, höchstens drei Versuche (staude/amiscara-connect#26).
@@ -59,7 +61,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/staude/amiscara-ssh/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/staude/amiscara-ssh/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/staude/amiscara-ssh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/staude/amiscara-ssh/compare/v0.1.0...v0.2.0
