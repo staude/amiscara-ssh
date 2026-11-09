@@ -4,6 +4,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-09
+
 ### Added
 
 - ProxyCommand: `Session::connect_command` startet einen lokalen Befehl (auf Unix `/bin/sh -c "exec …"`, auf Windows `cmd.exe /S /C "…"`) und führt die Verbindung über dessen stdin und stdout; `Route::proxy_command` tut das für den ersten Sprung einer Kette. Platzhalter `%h`, `%p`, `%r` und `%%` wie in OpenSSH; ein unbekannter Platzhalter und ein Host oder Benutzer mit Zeichen, die in einer Befehlszeile gefährlich sind, werden vor dem Start abgelehnt. Endet der Befehl vor der Anmeldung, nennt der Fehler Exit-Status und Fehlerausgabe, nie den Befehl (wiederholt die Fehlerausgabe ihn oder Teile davon, werden sie dort nach bestem Wissen ersetzt), auch wenn ein von ihm gestarteter Prozess stdout offen hält; ein Helfer, der erst nach einem SSH-Fehler mit Erfolg endet, verdeckt diesen nicht. Endet die Verbindung, endet auch der Befehl, nach einer Sekunde Schonfrist, auf Windows samt dem Baum unter `cmd.exe` (staude/amiscara-connect#28).
@@ -72,7 +74,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/staude/amiscara-ssh/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/staude/amiscara-ssh/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/staude/amiscara-ssh/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/staude/amiscara-ssh/compare/v0.2.0...v0.3.0
