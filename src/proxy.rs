@@ -76,8 +76,14 @@ fn safe<'a>(what: &str, value: &'a str) -> Result<&'a str, SshError> {
 /// How the command ended.
 #[derive(Debug, Clone)]
 enum Ended {
-    /// By itself, with the last of its error output.
-    Exited { status: ExitStatus, stderr: String },
+    /// By itself, with the last of its error output. `on_its_own`: before
+    /// the stream was dropped, not in reaction to it (a helper usually ends
+    /// with success once its stdin closes).
+    Exited {
+        status: ExitStatus,
+        stderr: String,
+        on_its_own: bool,
+    },
     /// Killed because the connection was dropped and it did not end within
     /// [`KILL_GRACE`].
     Killed,
@@ -179,14 +185,17 @@ async fn watch_child(
     tail: Arc<Mutex<Vec<u8>>>,
     ended: watch::Sender<Option<Ended>>,
 ) {
-    let status = tokio::select! {
+    let (status, on_its_own) = tokio::select! {
         biased;
-        status = child.wait() => status.ok(),
+        status = child.wait() => (status.ok(), true),
         // The sender never sends: dropping it is the signal.
-        _ = killed => tokio::time::timeout(KILL_GRACE, child.wait())
-            .await
-            .ok()
-            .and_then(Result::ok),
+        _ = killed => {
+            let status = tokio::time::timeout(KILL_GRACE, child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok);
+            (status, false)
+        }
     };
     let Some(status) = status else {
         kill(&mut child).await;
@@ -201,7 +210,11 @@ async fn watch_child(
         let tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
         String::from_utf8_lossy(&tail).trim().to_owned()
     };
-    ended.send_replace(Some(Ended::Exited { status, stderr }));
+    ended.send_replace(Some(Ended::Exited {
+        status,
+        stderr,
+        on_its_own,
+    }));
 }
 
 /// Kills the command. On Windows `cmd.exe` is the child and the command runs
@@ -246,15 +259,21 @@ impl CommandExit {
         let ended = tokio::time::timeout(EXIT_WAIT, ended.wait_for(Option::is_some)).await;
         match ended {
             Ok(Ok(ended)) => match ended.as_ref() {
-                Some(Ended::Exited { status, stderr }) => self.failure(*status, stderr),
-                Some(Ended::Killed) | None => error,
+                // A helper that ends with success after the connection
+                // dropped it only followed; the error of SSH is the cause.
+                Some(Ended::Exited {
+                    status,
+                    stderr,
+                    on_its_own,
+                }) if *on_its_own || !status.success() => self.failure(*status, stderr),
+                Some(Ended::Exited { .. } | Ended::Killed) | None => error,
             },
             _ => error,
         }
     }
 
-    /// Waits until the command ended by itself and returns that as
-    /// [`SshError::ProxyCommand`]; never returns if it was killed. Raced
+    /// Waits until the command ended by itself with a failure and returns
+    /// that as [`SshError::ProxyCommand`]; never returns otherwise. Raced
     /// against the sign-in, so a command that ends while something else
     /// (a process it started) still holds its stdout does not leave the
     /// sign-in waiting.
@@ -262,8 +281,12 @@ impl CommandExit {
         let mut ended = self.ended.clone();
         let failure = match ended.wait_for(Option::is_some).await {
             Ok(ended) => match ended.as_ref() {
-                Some(Ended::Exited { status, stderr }) => Some(self.failure(*status, stderr)),
-                Some(Ended::Killed) | None => None,
+                // Only a failure: a wrapper may end with success and leave
+                // the connection to a process it started.
+                Some(Ended::Exited { status, stderr, .. }) if !status.success() => {
+                    Some(self.failure(*status, stderr))
+                }
+                Some(Ended::Exited { .. } | Ended::Killed) | None => None,
             },
             Err(_) => None,
         };

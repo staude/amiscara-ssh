@@ -155,3 +155,16 @@ async fn dropped_transport_ends_the_command_below_cmd() -> Result<(), Box<dyn st
     assert_eq!(before, after, "the command below cmd.exe still runs");
     Ok(())
 }
+
+/// A helper that ends with success once its stdin closes, behind a server
+/// that sends garbage: the error is the one of SSH, not of the command.
+#[cfg(unix)]
+#[tokio::test]
+async fn protocol_error_is_not_blamed_on_a_helper_that_follows() {
+    let command = r#"sh -c 'printf "SSH-2.0-x\r\nGARBAGEGARBAGEGARBAGE\n"; cat >/dev/null'"#;
+    match Session::connect_command(command, &target()).await {
+        Err(SshError::ProxyCommand(reason)) => panic!("blamed the command: {reason}"),
+        Err(_) => {}
+        Ok(_) => panic!("signed in over garbage"),
+    }
+}
