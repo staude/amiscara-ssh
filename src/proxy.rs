@@ -154,8 +154,14 @@ async fn read_stderr(mut stderr: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
                 let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
                 tail.extend_from_slice(&buf[..n]);
                 if tail.len() > STDERR_TAIL {
+                    // Cut at a line start, so no half line with half a
+                    // secret stays that the redaction no longer recognises.
                     let cut = tail.len() - STDERR_TAIL;
-                    tail.drain(..cut);
+                    let line = tail[cut..]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .map_or(tail.len(), |at| cut + at + 1);
+                    tail.drain(..line);
                 }
             }
         }
@@ -277,20 +283,36 @@ impl CommandExit {
     }
 }
 
-/// Words of a command at least this long are taken for secrets (tokens,
-/// keys) and kept out of the error output.
-const SECRET_WORD: usize = 16;
+/// Parts of a command at least this long are taken for possible secrets
+/// (tokens, keys, passwords) and kept out of the error output.
+const SECRET_PART: usize = 8;
 
-/// `stderr` without the command: a shell repeats the whole line on a syntax
-/// error, and it may carry an access token. Long words of the command go as
-/// well, also where only part of the line is repeated.
+/// `stderr` without the command, as far as it can tell: a shell repeats the
+/// whole line on a syntax error, a helper may print an argument, and either
+/// may carry an access token. The whole command goes, then every word and
+/// every part of a word between quotes, `=`, `:`, `@`, `,`, `;`, `&`, `?`
+/// and brackets that is at least [`SECRET_PART`] long, so `--token=…`,
+/// `user:password@host` or a quoted value go too. Best effort: a helper
+/// that prints a secret it got some other way is not caught.
 fn redact(stderr: &str, command: &str) -> String {
     let mut text = stderr.replace(command, "<command>");
-    for word in command
+    let separators = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '=' | ':' | '@' | ',' | ';' | '&' | '?' | '(' | ')' | '[' | ']'
+            )
+    };
+    let mut parts: Vec<&str> = command
         .split_whitespace()
-        .filter(|word| word.len() >= SECRET_WORD)
-    {
-        text = text.replace(word, "…");
+        .chain(command.split(separators))
+        .filter(|part| part.len() >= SECRET_PART)
+        .collect();
+    // Longest first, so a word goes as a whole before its parts.
+    parts.sort_by_key(|part| std::cmp::Reverse(part.len()));
+    parts.dedup();
+    for part in parts {
+        text = text.replace(part, "…");
     }
     text
 }
@@ -385,6 +407,12 @@ mod tests {
         // Only part of the line repeated: the long word still goes.
         let partial = redact("token abcdefghijklmnopqrstuvwxyz rejected", command);
         assert_eq!(partial, "token … rejected");
+        // Values after `=`, in quotes and in URL user info.
+        let command = "helper --token=s3cr3tvalue \"--pass 'hunter22x'\" https://bob:pw4711xyz@h";
+        for printed in ["s3cr3tvalue", "hunter22x", "pw4711xyz"] {
+            let redacted = redact(&format!("bad value {printed}"), command);
+            assert!(!redacted.contains(printed), "{redacted}");
+        }
     }
 
     #[test]

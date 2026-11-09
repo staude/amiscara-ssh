@@ -49,7 +49,9 @@ pub enum SshError {
     /// The ProxyCommand was refused before it started (unknown placeholder,
     /// host or user not fit for a command line) or ended before the
     /// sign-in, then with its exit status and the last of its error output.
-    /// Never holds the command itself, it may carry an access token.
+    /// Never holds the command itself, it may carry an access token; parts
+    /// of the command that the error output repeats are replaced, as far as
+    /// they can be recognised.
     #[error("proxy command: {0}")]
     ProxyCommand(String),
     /// A hop of a [`crate::Route`] failed: `index` counts from the first jump
