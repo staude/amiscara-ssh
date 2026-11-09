@@ -70,7 +70,7 @@ use amiscara_ssh::{HopState, PoolConfig, PtySize, Route, SessionPool, SshTarget}
 // bastion, jump und target sind SshTarget wie oben
 let pool = SessionPool::new(PoolConfig::default());
 let mut events = pool.subscribe();
-let route = Route { jumps: vec![bastion, jump], target };
+let route = Route { jumps: vec![bastion, jump], target, proxy_command: None };
 let session = pool.connect(&route).await?; // zweiter Aufruf: Sprünge wiederverwendet
 let shell = session.open_shell("xterm-256color", PtySize { cols: 80, rows: 24 }).await?;
 while let Ok(event) = events.try_recv() {
@@ -83,7 +83,7 @@ while let Ok(event) = events.try_recv() {
 - Scheitert ein Sprung, liefert `connect` `SshError::Hop` mit Index und `user@host:port`, das Ereignis `HopState::Failed` nennt die Fehlerart (`HopFailure`).
 - `agent_forward: true` am Ziel gibt Shells dort den lokalen SSH-Agent. Sprünge bekommen ihn nie, auch wenn ihr `SshTarget` es verlangt.
 - Eine `Lease` gibt man durch Fallenlassen zurück, nicht mit `disconnect()`: das schlösse die geteilte Verbindung für alle. Auch ein abgebrochenes `connect` hinterlässt nichts im Pool.
-- Der Pool-Schlüssel ist der Weg aus Host, Port und Benutzer je Sprung (beim Ziel auch `agent_forward`). Zugangsdaten und Host-Key-Regel gehören nicht dazu: Eine lebende Verbindung wird so weiterbenutzt, wie sie angemeldet und geprüft wurde.
+- Der Pool-Schlüssel ist der Weg aus Host, Port und Benutzer je Sprung (beim Ziel auch `agent_forward`, beim ersten Sprung auch `proxy_command`). Zugangsdaten und Host-Key-Regel gehören nicht dazu: Eine lebende Verbindung wird so weiterbenutzt, wie sie angemeldet und geprüft wurde.
 
 ## Einmalcodes
 
@@ -120,6 +120,30 @@ bastion.keyboard_interactive = Some(Arc::new(Dialog));
 - Die Wartezeit begrenzt der Server selbst (OpenSSH `LoginGraceTime`, meist 120 s); antwortet der Nutzer später, endet der Aufbau mit `HopFailure::Closed`.
 - Der Pool hält einen Sprung, der gefragt hat, nach der letzten `Lease` noch offen: `keep_open` der Antwort, sonst `PoolConfig::code_grace` (60 s). In dieser Zeit braucht eine neue Sitzung keinen Code, auch nicht nach einem Fehler weiter hinten, etwa einer Host-Key-Bestätigung. `SessionPool::close_idle` schließt alle ungenutzten Verbindungen sofort, etwa beim Sperren der App. Schließt die Bastion ungenutzte Verbindungen selbst (OpenSSH `UnusedConnectionTimeout`), endet das Offenhalten früher. Offengehalten wird nur, wenn die letzte `Lease` in einer Tokio-Runtime fallengelassen wird; außerhalb davon (etwa auf einem fremden Thread) schließt der Sprung sofort.
 - russh kopiert die Antworten beim Senden in einfache `String`s; nur die Kopien in `KeyboardAnswer` werden beim Drop gelöscht.
+
+## ProxyCommand
+
+Manche Server erreicht man nur über ein Hilfsprogramm, etwa `cloudflared` oder AWS SSM. `Session::connect_command` startet einen lokalen Befehl und spricht SSH über dessen stdin und stdout; in einer Kette übernimmt `Route::proxy_command` das für den ersten Sprung (den ersten Jump oder, ohne Jumps, das Ziel).
+
+```rust
+use amiscara_ssh::{Route, Session};
+
+// target ist ein SshTarget wie oben
+let session = Session::connect_command("cloudflared access ssh --hostname %h", &target).await?;
+
+let route = Route {
+    proxy_command: Some("aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p".into()),
+    ..Route::direct(target)
+};
+let session = pool.connect(&route).await?;
+```
+
+- Platzhalter wie in OpenSSH: `%h` Host, `%p` Port, `%r` Benutzer, `%%` ein `%`. Ein anderer Platzhalter oder ein einzelnes `%` am Ende endet vor dem Start in `SshError::ProxyCommand`.
+- Host und Benutzer kommen ungeschützt in die Befehlszeile. Sie dürfen deshalb nur aus ASCII-Buchstaben, Ziffern und `. - _ : @` bestehen und nicht mit `-` beginnen, sonst lehnt das Crate vor dem Start ab. So kann ein Eintrag in einem geteilten Dokument keine fremden Befehle einschleusen.
+- Der Befehl läuft auf Unix als `/bin/sh -c "exec <Befehl>"` (wie OpenSSH), auf Windows als `cmd.exe /S /C "<Befehl>"` ohne Konsolenfenster, Anführungszeichen im Befehl (etwa um `C:\Program Files\…`) bleiben erhalten.
+- Endet der Befehl vor der Anmeldung, nennt `SshError::ProxyCommand` seinen Exit-Status und die letzten 2 KiB seiner Fehlerausgabe, nie den Befehl selbst (er kann ein Zugangs-Token enthalten): Wiederholt die Fehlerausgabe ihn, etwa die Shell bei einem Syntaxfehler, steht dort `<command>`, Wörter des Befehls und Teile davon (zwischen Anführungszeichen, `=`, `:`, `@` und Ähnlichem) ab 8 Zeichen werden zu `…`. Das ist eine Schutzmaßnahme nach bestem Wissen: Gibt ein Helfer ein Geheimnis aus, das er auf anderem Weg bekommen hat, bleibt es stehen. Endet der Befehl mit Fehler, während ein von ihm gestarteter Prozess stdout noch offen hält, bricht die Anmeldung sofort ab. Endet ein Helfer erst, nachdem die Verbindung an einem SSH-Fehler gescheitert ist, und das mit Erfolg, bleibt der SSH-Fehler stehen. Im Ereignis steht `HopFailure::ProxyCommand`. Host-Key- und Anmeldefehler bleiben, was sie sind. Auch `Debug` von `Route` zeigt den Befehl nicht.
+- Im Pool darf der Aufbau des ersten Sprungs über einen Befehl bis zu `PoolConfig::proxy_connect_timeout` dauern (120 s), weil etwa `cloudflared` beim ersten Mal auf die Anmeldung im Browser wartet. `Session::connect_command` hat wie `Session::connect` kein eigenes Zeitlimit.
+- Endet die Verbindung, beendet das Crate den Befehl; endet er nicht binnen einer Sekunde von selbst, wird er abgeschossen, auf Windows samt allem, was unter `cmd.exe` läuft.
 
 ## SFTP
 

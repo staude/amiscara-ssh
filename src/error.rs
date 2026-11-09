@@ -46,6 +46,14 @@ pub enum SshError {
     /// example by answering a [`crate::KeyboardPrompt`] with `None`.
     #[error("sign-in to {0} was cancelled")]
     Cancelled(String),
+    /// The ProxyCommand was refused before it started (unknown placeholder,
+    /// host or user not fit for a command line) or ended before the
+    /// sign-in, then with its exit status and the last of its error output.
+    /// Never holds the command itself, it may carry an access token; parts
+    /// of the command that the error output repeats are replaced, as far as
+    /// they can be recognised.
+    #[error("proxy command: {0}")]
+    ProxyCommand(String),
     /// A hop of a [`crate::Route`] failed: `index` counts from the first jump
     /// (0), the target is the last index; `hop` is `user@host:port`.
     #[error("hop {index} ({hop}): {source}")]
@@ -94,6 +102,7 @@ mod tests {
         assert!(!SshError::Io(std::io::Error::other("x")).needs_user());
         assert!(!SshError::Timeout("u@h:22".into()).needs_user());
         assert!(!SshError::SftpUnavailable("refused".into()).needs_user());
+        assert!(!SshError::ProxyCommand("ended with exit status: 1".into()).needs_user());
         let hop = |source| SshError::Hop {
             index: 1,
             hop: "u@jump:22".into(),

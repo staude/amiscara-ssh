@@ -19,6 +19,7 @@ use crate::SshError;
 use crate::chain::Reporter;
 use crate::host_key::{HostKeyCheck, HostKeyPolicy};
 use crate::prompt::{KeyboardInteractive, KeyboardPrompt, PromptLine};
+use crate::proxy;
 
 /// Refused rounds of keyboard-interactive before giving up, three attempts
 /// as servers usually allow.
@@ -126,6 +127,44 @@ impl Session {
     pub async fn connect_via(jump: &Session, target: &SshTarget) -> Result<Self, SshError> {
         let stream = jump.open_via(target).await?;
         Self::start(target, stream, default_config(), None).await
+    }
+
+    /// Connects to `target` over a local command (ProxyCommand): its stdin
+    /// and stdout carry the connection, for servers reachable only through a
+    /// helper such as `cloudflared` or AWS SSM. `%h`, `%p`, `%r` and `%%` in
+    /// `command` are replaced by host, port, user and `%`; the command runs
+    /// through `/bin/sh` on Unix and `cmd.exe` on Windows. Dropping the
+    /// session kills the command. No time limit of its own, as with
+    /// [`Session::connect`].
+    ///
+    /// An unknown placeholder, or a host or user with characters that are
+    /// unsafe in a command line, ends in [`SshError::ProxyCommand`] before
+    /// anything starts; so does a command that ends before the sign-in, with
+    /// its exit status and the last of its error output. Other errors as with
+    /// [`Session::connect`].
+    pub async fn connect_command(command: &str, target: &SshTarget) -> Result<Self, SshError> {
+        Self::start_command(command, target, default_config(), None).await
+    }
+
+    /// Starts `command` for `target` and runs SSH over it.
+    pub(crate) async fn start_command(
+        command: &str,
+        target: &SshTarget,
+        config: Arc<client::Config>,
+        reporter: Option<Reporter>,
+    ) -> Result<Self, SshError> {
+        let expanded = proxy::expand(command, target)?;
+        let (stream, exit) = proxy::spawn(&expanded)?;
+        let start = Self::start(target, stream, config, reporter);
+        tokio::pin!(start);
+        tokio::select! {
+            biased;
+            result = &mut start => match result {
+                Ok(session) => Ok(session),
+                Err(error) => Err(exit.explain(error).await),
+            },
+            failure = exit.ended_early() => Err(failure),
+        }
     }
 
     /// The TCP connection to `target`.

@@ -28,6 +28,14 @@
 //! next session needs no new code; [`SessionPool::close_idle`] closes it
 //! early.
 //!
+//! ProxyCommand: [`Session::connect_command`] runs a local command, for
+//! example `cloudflared access ssh --hostname %h`, and speaks SSH over its
+//! stdin and stdout; in a [`Route`] [`Route::proxy_command`] does the same for
+//! the first hop. `%h`, `%p`, `%r` and `%%` are replaced as in OpenSSH, a
+//! host or user that is unsafe in a command line is refused. If the command
+//! ends before the sign-in, [`SshError::ProxyCommand`] names its exit status
+//! and the last of its error output; dropping the connection kills it.
+//!
 //! Files: [`Session::open_sftp`] starts the `sftp` subsystem on a session,
 //! also one behind jumps, and returns a [`russh_sftp::client::SftpSession`].
 //! The crate re-exports [`russh_sftp`], so apps use the same version.
@@ -41,6 +49,7 @@ mod error;
 mod host_key;
 pub mod keys;
 mod prompt;
+mod proxy;
 mod sftp;
 mod shell;
 

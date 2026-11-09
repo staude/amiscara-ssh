@@ -16,18 +16,36 @@ use crate::{Session, SshError, SshTarget};
 /// signs in with its own user and credentials and is checked against its own
 /// host key policy. A hop's `host` is resolved by the hop before it, so the
 /// host key of `jump` is looked up as `jump`, not under an address.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Route {
     pub jumps: Vec<SshTarget>,
     pub target: SshTarget,
+    /// ProxyCommand for the first hop (the first jump, or the target of a
+    /// route without jumps): its stdin and stdout carry the connection
+    /// instead of TCP, as with [`Session::connect_command`]. Its set-up may
+    /// take up to [`PoolConfig::proxy_connect_timeout`], for helpers that
+    /// first wait for a sign-in in the browser. `Debug` hides it, it may
+    /// carry an access token.
+    pub proxy_command: Option<String>,
+}
+
+impl std::fmt::Debug for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Route")
+            .field("jumps", &self.jumps)
+            .field("target", &self.target)
+            .field("proxy_command", &self.proxy_command.as_ref().map(|_| ".."))
+            .finish()
+    }
 }
 
 impl Route {
-    /// A route without jumps.
+    /// A route without jumps, over TCP.
     pub fn direct(target: SshTarget) -> Self {
         Self {
             jumps: Vec::new(),
             target,
+            proxy_command: None,
         }
     }
 
@@ -56,6 +74,10 @@ pub struct PoolConfig {
     /// quick retry, for example after confirming a host key further down,
     /// needs no second code. Hops that asked nothing close at once.
     pub code_grace: Duration,
+    /// Limit for a first hop over [`Route::proxy_command`], instead of
+    /// `connect_timeout`: a helper like `cloudflared` may first wait for a
+    /// sign-in in the browser.
+    pub proxy_connect_timeout: Duration,
 }
 
 impl Default for PoolConfig {
@@ -65,6 +87,7 @@ impl Default for PoolConfig {
             keepalive_interval: Duration::from_secs(5),
             keepalive_max: 3,
             code_grace: Duration::from_secs(60),
+            proxy_connect_timeout: Duration::from_secs(120),
         }
     }
 }
@@ -121,6 +144,9 @@ pub enum HopFailure {
     Cancelled,
     /// The connection ended while setting up.
     Closed,
+    /// The ProxyCommand of the first hop was refused, did not start or
+    /// ended before the sign-in.
+    ProxyCommand,
     /// Anything else, for example an unreadable key file.
     Other,
 }
@@ -134,6 +160,7 @@ impl From<&SshError> for HopFailure {
             SshError::HostKeyChanged { .. } => Self::HostKeyChanged,
             SshError::AuthFailed(_) => Self::AuthFailed,
             SshError::Cancelled(_) => Self::Cancelled,
+            SshError::ProxyCommand(_) => Self::ProxyCommand,
             SshError::Ssh(russh::Error::ChannelOpenFailure(_)) => Self::ChannelRefused,
             SshError::Ssh(
                 russh::Error::Disconnect
@@ -235,22 +262,26 @@ impl Reporter {
 }
 
 /// One hop of a pool key. The agent setting belongs to it, so a target with
-/// agent forwarding never shares a connection with one without.
+/// agent forwarding never shares a connection with one without; so does the
+/// ProxyCommand (unexpanded, only on the first hop), so the way over a
+/// command and the way over TCP are two connections.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct HopKey {
     host: String,
     port: u16,
     user: String,
     agent_forward: bool,
+    proxy: Option<String>,
 }
 
 impl HopKey {
-    fn of(hop: &SshTarget) -> Self {
+    fn of(hop: &SshTarget, proxy: Option<&str>) -> Self {
         Self {
             host: hop.host.to_ascii_lowercase(),
             port: hop.port,
             user: hop.user.clone(),
             agent_forward: hop.agent_forward,
+            proxy: proxy.map(str::to_owned),
         }
     }
 }
@@ -451,6 +482,7 @@ struct Shared {
     events: broadcast::Sender<HopEvent>,
     config: Arc<client::Config>,
     connect_timeout: Duration,
+    proxy_connect_timeout: Duration,
     code_grace: Duration,
 }
 
@@ -611,6 +643,7 @@ impl SessionPool {
                 events,
                 config: Arc::new(client),
                 connect_timeout: config.connect_timeout,
+                proxy_connect_timeout: config.proxy_connect_timeout,
                 code_grace: config.code_grace,
             }),
         }
@@ -674,7 +707,8 @@ impl SessionPool {
         let mut below: Option<Arc<Session>> = None;
 
         for (index, hop) in hops.iter().enumerate() {
-            key.push(HopKey::of(hop));
+            let proxy = route.proxy_command.as_deref().filter(|_| index == 0);
+            key.push(HopKey::of(hop, proxy));
             let pooled = !(fresh && index == last);
             // Only one lock at a time: a route through the same bastion does
             // not wait while this one signs in further down.
@@ -700,7 +734,9 @@ impl SessionPool {
                 armed: Arc::new(AtomicBool::new(false)),
                 pause: Arc::new(watch::channel(Pause::default()).0),
             };
-            let built = self.build(hop, below.as_deref(), reporter.clone()).await;
+            let built = self
+                .build(hop, below.as_deref(), proxy, reporter.clone())
+                .await;
             let (session, latency) = match built {
                 Ok(built) => built,
                 Err((error, failure)) => {
@@ -756,13 +792,15 @@ impl SessionPool {
         }
     }
 
-    /// Opens the transport to `hop` (TCP, or a channel on `below`) and signs
-    /// in, within the time limit. Time spent waiting for the user does not
-    /// count, neither towards the limit nor towards the latency.
+    /// Opens the transport to `hop` (TCP, the command `proxy` for the first
+    /// hop, or a channel on `below`) and signs in, within the time limit.
+    /// Time spent waiting for the user does not count, neither towards the
+    /// limit nor towards the latency.
     async fn build(
         &self,
         hop: &SshTarget,
         below: Option<&Session>,
+        proxy: Option<&str>,
         reporter: Reporter,
     ) -> Result<(Session, Duration), (SshError, HopFailure)> {
         let started = Instant::now();
@@ -772,6 +810,9 @@ impl SessionPool {
         let mut pauses = pause.subscribe();
         let set_up = async {
             let session = match below {
+                None if let Some(command) = proxy => {
+                    Session::start_command(command, hop, config, Some(reporter)).await
+                }
                 None => {
                     let stream = Session::open_tcp(hop)
                         .await
@@ -796,7 +837,10 @@ impl SessionPool {
             })
         };
         tokio::pin!(set_up);
-        let limit = self.shared.connect_timeout;
+        let limit = match (below, proxy) {
+            (None, Some(_)) => self.shared.proxy_connect_timeout,
+            _ => self.shared.connect_timeout,
+        };
         let result = loop {
             let current = *pauses.borrow_and_update();
             if current.since.is_some() {
@@ -872,6 +916,7 @@ mod tests {
                 port: 22,
                 user: "u".into(),
                 agent_forward: false,
+                proxy: None,
             })
             .collect()
     }
@@ -906,6 +951,10 @@ mod tests {
             HopFailure::from(&SshError::Ssh(russh::Error::Disconnect)),
             HopFailure::Closed
         );
+        assert_eq!(
+            HopFailure::from(&SshError::ProxyCommand("ended with exit status: 1".into())),
+            HopFailure::ProxyCommand
+        );
     }
 
     #[test]
@@ -922,7 +971,9 @@ mod tests {
         let route = Route {
             jumps: vec![hop("bastion"), hop("jump")],
             target: hop("target"),
+            proxy_command: Some("cloudflared access ssh --token geheim".into()),
         };
+        assert!(!format!("{route:?}").contains("geheim"));
         assert_eq!(
             route.labels(),
             vec!["u@bastion:22", "u@jump:22", "u@target:22"]
@@ -937,5 +988,9 @@ mod tests {
         assert_ne!(behind_a, behind_b);
         assert!(behind_a.starts_with(&key(&["a"])));
         assert!(!behind_b.starts_with(&key(&["a"])));
+        let mut over_command = key(&["a", "x"]);
+        over_command[0].proxy = Some("nc %h %p".into());
+        assert_ne!(over_command, behind_a);
+        assert!(!over_command.starts_with(&key(&["a"])));
     }
 }
