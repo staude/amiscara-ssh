@@ -120,18 +120,18 @@ struct Forwarder {
 /// descriptors).
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 
-/// Binds `addr` and listens. Other than [`TcpListener::bind`] without `SO_REUSEADDR` on the
-/// wildcard check: on macOS and the BSDs that option lets a socket bind `127.0.0.1:port` while
-/// another program listens on `0.0.0.0:port`, and clients of that program would silently land in
-/// the forward. So a specific address first checks that the wildcard address of its family is
-/// free on that port; the listener itself keeps `SO_REUSEADDR`, so a port is free again at once
-/// after a forward ends, also with connections in `TIME_WAIT`. A program on another specific
-/// address of the same port (say `192.168.1.5:port`) counts as taking the port too.
+/// Binds `addr` and listens, with `SO_REUSEADDR` on Unix like [`TcpListener::bind`], so a port
+/// is free again at once after a forward ends, also with connections in `TIME_WAIT`. On macOS
+/// and the BSDs that option also lets a socket bind `127.0.0.1:port` while another program
+/// listens on `0.0.0.0:port`, and clients of that program would silently land in the forward.
+/// There a specific address first checks that the wildcard address of its family is free on
+/// that port. Linux and Windows refuse such a bind by themselves.
 fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let socket = |ip: IpAddr| match ip {
         IpAddr::V4(_) => TcpSocket::new_v4(),
         IpAddr::V6(_) => TcpSocket::new_v6(),
     };
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
     if addr.port() != 0 && !addr.ip().is_unspecified() {
         let wildcard = match addr.ip() {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -139,8 +139,6 @@ fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
         };
         let probe = socket(wildcard)?;
         // Without it a connection of an earlier forward in `TIME_WAIT` would count as taken.
-        // Windows needs none for that, and there it would let the probe share a taken port.
-        #[cfg(unix)]
         probe.set_reuseaddr(true)?;
         probe.bind(SocketAddr::new(wildcard, addr.port()))?;
         drop(probe);
@@ -192,7 +190,8 @@ struct Current {
 impl Current {
     /// The lease to use for a new client: the current one, or once a new one if its
     /// connection has ended. Runs in the task of the client, so accepting goes on meanwhile;
-    /// clients arriving during the set-up wait for it and then use its result.
+    /// clients arriving during the set-up wait for it and use the new lease, or try once more
+    /// themselves if it failed.
     async fn get(self) -> Result<Arc<Lease>, SshError> {
         let mut lease = self.lease.lock().await;
         if lease.is_closed() {
