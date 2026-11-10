@@ -162,8 +162,8 @@ status.changed().await?;
 println!("aktiv: {}, Fehler: {:?}", status.borrow().active, status.borrow().error);
 ```
 
-- Erst wird der Port gebunden, dann die Route aufgebaut. Ist der Port belegt, endet der Aufruf in `SshError::PortInUse` mit der Adresse, bevor eine Verbindung entsteht; Fehler beim Aufbau der Route kommen unverändert als `SshError::Hop`.
-- Die `LocalForward` hält eine `Lease` auf die Route, solange sie lebt. Ist die Verbindung beendet, wenn sich ein Client verbindet, baut sie die Route für diesen Client einmal neu auf.
+- Erst wird der Port gebunden, dann die Route aufgebaut. Ist der Port belegt, endet der Aufruf in `SshError::PortInUse` mit der Adresse, bevor eine Verbindung entsteht; Fehler beim Aufbau der Route kommen unverändert als `SshError::Hop`. Belegt heißt auch: Ein anderes Programm lauscht auf `0.0.0.0` bzw. `::` oder einer anderen Adresse desselben Ports. Auf macOS ließe `SO_REUSEADDR` sonst `127.0.0.1` neben `0.0.0.0` zu, und Clients landeten still im Tunnel statt beim Programm.
+- Die `LocalForward` hält eine `Lease` auf die Route, solange sie lebt. Ist die Verbindung beendet, wenn sich ein Client verbindet, baut sie die Route für diesen Client einmal neu auf. Das läuft in der Task des Clients, der Port nimmt währenddessen weiter an; Clients, die in dieser Zeit kommen, warten auf diesen Aufbau und nutzen sein Ergebnis.
 - `ForwardStatus` nennt die aktiven Verbindungen und als `HopFailure` den Grund, aus dem die letzte Verbindung nicht weitergeleitet werden konnte, etwa `ChannelRefused`, wenn am Ziel nichts lauscht. Der Port lauscht danach weiter; die nächste gelungene Verbindung leert den Fehler.
 - Drop beendet das Lauschen und jede weitergeleitete Verbindung und gibt die `Lease` zurück. Die Weiterleitung läuft in Tasks der Tokio-Runtime, in der `forward_local` aufgerufen wurde.
 - An welche Adresse gebunden wird, entscheidet die App; `127.0.0.1` hält den Port aus dem Netz.

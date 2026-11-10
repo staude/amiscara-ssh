@@ -467,3 +467,23 @@ async fn local_forward_reports_a_refused_target() -> TestResult {
     drop(stream);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn local_forward_sees_a_port_taken_on_every_address() -> TestResult {
+    // On macOS SO_REUSEADDR alone would let 127.0.0.1 share a port held on 0.0.0.0.
+    let holder = std::net::TcpListener::bind(("0.0.0.0", 0))?;
+    let port = holder.local_addr()?.port();
+    let dir = tempfile::tempdir()?;
+    let pool = SessionPool::new(PoolConfig::default());
+    let route = Route::direct(target(key_identity(), tofu(&dir)));
+    let bind = ([127, 0, 0, 1], port).into();
+    let taken = pool
+        .forward_local(route, bind, "127.0.0.1".into(), 22)
+        .await;
+    assert!(
+        matches!(taken, Err(SshError::PortInUse(addr)) if addr == bind),
+        "{taken:?}"
+    );
+    Ok(())
+}

@@ -1,11 +1,12 @@
 //! Local port forwarding over a [`Route`]: a local TCP port whose
 //! connections reach `host:port` as seen from the target of the route.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::sync::{Mutex, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::{HopFailure, Lease, Route, SessionPool, SshError};
@@ -78,7 +79,7 @@ impl SessionPool {
         host: String,
         port: u16,
     ) -> Result<LocalForward, SshError> {
-        let listener = TcpListener::bind(bind).await.map_err(|error| {
+        let listener = listen(bind).map_err(|error| {
             if error.kind() == std::io::ErrorKind::AddrInUse {
                 SshError::PortInUse(bind)
             } else {
@@ -93,7 +94,7 @@ impl SessionPool {
             route,
             host,
             port,
-            lease: Arc::new(lease),
+            lease: Arc::new(Mutex::new(Arc::new(lease))),
             status: Arc::new(status),
         };
         let task = tokio::spawn(forwarder.run(listener));
@@ -110,41 +111,94 @@ struct Forwarder {
     route: Route,
     host: String,
     port: u16,
-    lease: Arc<Lease>,
+    /// The lease new clients use; replaced once its connection has ended.
+    lease: Arc<Mutex<Arc<Lease>>>,
     status: Arc<watch::Sender<ForwardStatus>>,
+}
+
+/// Wait after a failed accept, which may fail again at once (for example out of file
+/// descriptors).
+const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+
+/// Binds `addr` and listens. Other than [`TcpListener::bind`] without `SO_REUSEADDR` on the
+/// wildcard check: on macOS and the BSDs that option lets a socket bind `127.0.0.1:port` while
+/// another program listens on `0.0.0.0:port`, and clients of that program would silently land in
+/// the forward. So a specific address first checks that the wildcard address of its family is
+/// free on that port; the listener itself keeps `SO_REUSEADDR`, so a port is free again at once
+/// after a forward ends, also with connections in `TIME_WAIT`. A program on another specific
+/// address of the same port (say `192.168.1.5:port`) counts as taking the port too.
+fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = |ip: IpAddr| match ip {
+        IpAddr::V4(_) => TcpSocket::new_v4(),
+        IpAddr::V6(_) => TcpSocket::new_v6(),
+    };
+    if addr.port() != 0 && !addr.ip().is_unspecified() {
+        let wildcard = match addr.ip() {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        };
+        let probe = socket(wildcard)?;
+        // Without it a connection of an earlier forward in `TIME_WAIT` would count as taken.
+        // Windows needs none for that, and there it would let the probe share a taken port.
+        #[cfg(unix)]
+        probe.set_reuseaddr(true)?;
+        probe.bind(SocketAddr::new(wildcard, addr.port()))?;
+        drop(probe);
+    }
+    let listener = socket(addr.ip())?;
+    #[cfg(unix)]
+    listener.set_reuseaddr(true)?;
+    listener.bind(addr)?;
+    listener.listen(1024)
 }
 
 impl Forwarder {
     /// Accepts until dropped. The connections run in `tasks`, so they end
     /// with it.
-    async fn run(mut self, listener: TcpListener) {
+    async fn run(self, listener: TcpListener) {
         let mut tasks = JoinSet::new();
         loop {
             tokio::select! {
                 accepted = listener.accept() => {
-                    // A failed accept (for example too many open files)
-                    // concerns only that client.
-                    if let Ok((stream, _)) = accepted {
-                        let lease = self.current().await;
-                        let status = Arc::clone(&self.status);
-                        let (host, port) = (self.host.clone(), self.port);
-                        tasks.spawn(forward(stream, lease, host, port, status));
+                    match accepted {
+                        Ok((stream, _)) => {
+                            let current = Current {
+                                pool: self.pool.clone(),
+                                route: self.route.clone(),
+                                lease: Arc::clone(&self.lease),
+                            };
+                            let status = Arc::clone(&self.status);
+                            let (host, port) = (self.host.clone(), self.port);
+                            tasks.spawn(forward(stream, current, host, port, status));
+                        }
+                        // A failed accept (for example too many open files) concerns only
+                        // that client; the pause keeps a lasting one from spinning.
+                        Err(_) => tokio::time::sleep(ACCEPT_PAUSE).await,
                     }
                 }
                 Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             }
         }
     }
+}
 
-    /// The lease to use for a new client: the current one, or once a new one
-    /// if its connection has ended.
-    async fn current(&mut self) -> Result<Arc<Lease>, SshError> {
-        if !self.lease.is_closed() {
-            return Ok(Arc::clone(&self.lease));
+/// What a client task needs to find its lease.
+struct Current {
+    pool: SessionPool,
+    route: Route,
+    lease: Arc<Mutex<Arc<Lease>>>,
+}
+
+impl Current {
+    /// The lease to use for a new client: the current one, or once a new one if its
+    /// connection has ended. Runs in the task of the client, so accepting goes on meanwhile;
+    /// clients arriving during the set-up wait for it and then use its result.
+    async fn get(self) -> Result<Arc<Lease>, SshError> {
+        let mut lease = self.lease.lock().await;
+        if lease.is_closed() {
+            *lease = Arc::new(self.pool.connect(&self.route).await?);
         }
-        let lease = Arc::new(self.pool.connect(&self.route).await?);
-        self.lease = Arc::clone(&lease);
-        Ok(lease)
+        Ok(Arc::clone(&lease))
     }
 }
 
@@ -160,12 +214,12 @@ impl Drop for Active {
 
 async fn forward(
     mut stream: TcpStream,
-    lease: Result<Arc<Lease>, SshError>,
+    current: Current,
     host: String,
     port: u16,
     status: Arc<watch::Sender<ForwardStatus>>,
 ) {
-    let channel = match lease {
+    let channel = match current.get().await {
         Ok(lease) => lease.direct_tcpip(&host, port).await.map(|c| (c, lease)),
         Err(error) => Err(error),
     };
