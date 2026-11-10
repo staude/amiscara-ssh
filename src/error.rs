@@ -54,6 +54,10 @@ pub enum SshError {
     /// they can be recognised.
     #[error("proxy command: {0}")]
     ProxyCommand(String),
+    /// The local address of a [`crate::LocalForward`] is taken by another
+    /// program.
+    #[error("local address {0} is already in use")]
+    PortInUse(std::net::SocketAddr),
     /// A hop of a [`crate::Route`] failed: `index` counts from the first jump
     /// (0), the target is the last index; `hop` is `user@host:port`.
     #[error("hop {index} ({hop}): {source}")]
@@ -103,6 +107,7 @@ mod tests {
         assert!(!SshError::Timeout("u@h:22".into()).needs_user());
         assert!(!SshError::SftpUnavailable("refused".into()).needs_user());
         assert!(!SshError::ProxyCommand("ended with exit status: 1".into()).needs_user());
+        assert!(!SshError::PortInUse(([127, 0, 0, 1], 8080).into()).needs_user());
         let hop = |source| SshError::Hop {
             index: 1,
             hop: "u@jump:22".into(),

@@ -4,6 +4,16 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+### Added
+
+- Lokale Port-Weiterleitung: `SessionPool::forward_local` lauscht auf einer lokalen Adresse und leitet jede Verbindung über `direct-tcpip` an Host und Port hinter dem Ziel einer `Route`, über die geteilten Sprünge des Pools. `LocalForward` nennt die echte Adresse (auch bei Port 0) und als `ForwardStatus` die aktiven Verbindungen und den letzten Fehler; eine beendete Verbindung wird für den nächsten Client einmal neu aufgebaut, Drop beendet alles und gibt die `Lease` zurück. Ein Port, auf dem ein anderes Programm an `0.0.0.0` lauscht, gilt als belegt, auch auf macOS (staude/amiscara-connect#54).
+- Tests: Weiterleitung auf den SSH-Port des Testservers und über zwei Sprünge, belegter Port, auch über `0.0.0.0`, abgelehnter Zielport, Port nach dem Drop wieder frei.
+
+### Changed
+
+- Neue Variante `SshError::PortInUse` mit der belegten Adresse, `HopFailure::from` ordnet sie `Other` zu; wer vollständig auf `SshError` matcht, ergänzt sie. Sie zählt nicht zu `needs_user`.
+- Der Testserver der Container-Tests erlaubt TCP-Weiterleitungen (`AllowTcpForwarding yes`).
+
 ## [0.6.0] - 2026-11-09
 
 ### Added
