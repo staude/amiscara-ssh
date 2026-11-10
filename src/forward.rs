@@ -123,15 +123,15 @@ const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 /// Binds `addr` and listens, with `SO_REUSEADDR` on Unix like [`TcpListener::bind`], so a port
 /// is free again at once after a forward ends, also with connections in `TIME_WAIT`. On macOS
 /// and the BSDs that option also lets a socket bind `127.0.0.1:port` while another program
-/// listens on `0.0.0.0:port`, and clients of that program would silently land in the forward.
-/// There a specific address first checks that the wildcard address of its family is free on
-/// that port. Linux and Windows refuse such a bind by themselves.
+/// listens on `0.0.0.0:port`, and clients of that program would silently land in the forward;
+/// Windows allows the same by default. There a specific address first checks that the wildcard
+/// address of its family is free on that port. Linux refuses such a bind by itself.
 fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let socket = |ip: IpAddr| match ip {
         IpAddr::V4(_) => TcpSocket::new_v4(),
         IpAddr::V6(_) => TcpSocket::new_v6(),
     };
-    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     if addr.port() != 0 && !addr.ip().is_unspecified() {
         let wildcard = match addr.ip() {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -139,6 +139,8 @@ fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
         };
         let probe = socket(wildcard)?;
         // Without it a connection of an earlier forward in `TIME_WAIT` would count as taken.
+        // Windows needs none for that, and there it would let the probe share a taken port.
+        #[cfg(unix)]
         probe.set_reuseaddr(true)?;
         probe.bind(SocketAddr::new(wildcard, addr.port()))?;
         drop(probe);
