@@ -862,3 +862,38 @@ async fn bastion_over_a_command_reaches_the_target() -> TestResult {
     wait_closed(&mut events, &[0, 1, 2], Duration::from_secs(10)).await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn local_forward_over_two_jumps_reaches_the_target_port() -> TestResult {
+    use tokio::io::AsyncReadExt;
+    let pool = SessionPool::new(PoolConfig::default());
+    let mut events = pool.subscribe();
+    let forward = pool
+        .forward_local(chain(), ([127, 0, 0, 1], 0).into(), "127.0.0.1".into(), 22)
+        .await?;
+    let local = forward.local_addr();
+    let mut status = forward.status();
+    {
+        let mut stream = tokio::net::TcpStream::connect(local).await?;
+        let mut head = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut head)).await??;
+        assert_eq!(&head, b"SSH-");
+        tokio::time::timeout(Duration::from_secs(10), status.wait_for(|s| s.active == 1)).await??;
+    }
+    tokio::time::timeout(Duration::from_secs(10), status.wait_for(|s| s.active == 0)).await??;
+
+    let taken = pool
+        .forward_local(chain(), local, "127.0.0.1".into(), 22)
+        .await;
+    assert!(
+        matches!(taken, Err(SshError::PortInUse(addr)) if addr == local),
+        "{taken:?}"
+    );
+
+    // The forward held the chain; dropping it closes every hop.
+    drain(&mut events);
+    drop(forward);
+    wait_closed(&mut events, &[0, 1, 2], Duration::from_secs(10)).await?;
+    Ok(())
+}

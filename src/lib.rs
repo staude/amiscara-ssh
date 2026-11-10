@@ -36,6 +36,12 @@
 //! ends before the sign-in, [`SshError::ProxyCommand`] names its exit status
 //! and the last of its error output; dropping the connection kills it.
 //!
+//! Port forwarding: [`SessionPool::forward_local`] listens on a local port
+//! and forwards every connection to a host and port as seen from the target
+//! of a [`Route`], over the shared connections of the pool. The
+//! [`LocalForward`] reports active connections and the last error as a
+//! [`ForwardStatus`]; a taken port ends in [`SshError::PortInUse`].
+//!
 //! Files: [`Session::open_sftp`] starts the `sftp` subsystem on a session,
 //! also one behind jumps, and returns a [`russh_sftp::client::SftpSession`].
 //! The crate re-exports [`russh_sftp`], so apps use the same version.
@@ -46,6 +52,7 @@
 mod chain;
 mod client;
 mod error;
+mod forward;
 mod host_key;
 pub mod keys;
 mod prompt;
@@ -56,6 +63,7 @@ mod shell;
 pub use chain::{HopEvent, HopFailure, HopState, Lease, PoolConfig, Route, SessionPool};
 pub use client::{Identity, Session, SshTarget};
 pub use error::SshError;
+pub use forward::{ForwardStatus, LocalForward};
 pub use host_key::{HostKeyPolicy, HostKeyVerdict, HostKeyVerifier, trust_host_key};
 pub use prompt::{KeyboardAnswer, KeyboardInteractive, KeyboardPrompt, PromptFuture, PromptLine};
 pub use shell::{PtySize, Shell, ShellEvent, ShellReader, ShellWriter};

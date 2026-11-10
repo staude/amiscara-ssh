@@ -173,7 +173,8 @@ impl From<&SshError> for HopFailure {
             | SshError::Ssh(_)
             | SshError::Key(_)
             | SshError::Refused(_)
-            | SshError::SftpUnavailable(_) => Self::Other,
+            | SshError::SftpUnavailable(_)
+            | SshError::PortInUse(_) => Self::Other,
         }
     }
 }

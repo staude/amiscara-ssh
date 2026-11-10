@@ -145,6 +145,29 @@ let session = pool.connect(&route).await?;
 - Im Pool darf der Aufbau des ersten Sprungs über einen Befehl bis zu `PoolConfig::proxy_connect_timeout` dauern (120 s), weil etwa `cloudflared` beim ersten Mal auf die Anmeldung im Browser wartet. `Session::connect_command` hat wie `Session::connect` kein eigenes Zeitlimit.
 - Endet die Verbindung, beendet das Crate den Befehl; endet er nicht binnen einer Sekunde von selbst, wird er abgeschossen, auf Windows samt allem, was unter `cmd.exe` läuft.
 
+## Port-Weiterleitung
+
+`SessionPool::forward_local` lauscht auf einem lokalen Port und leitet jede Verbindung über einen `direct-tcpip`-Kanal an Host und Port weiter, wie das Ziel einer `Route` sie sieht. Die Sprünge kommen aus dem Pool und werden mit anderen Sitzungen geteilt.
+
+```rust
+use amiscara_ssh::{Route, SessionPool};
+
+// pool und route wie oben; Port 0 wählt einen freien Port
+let forward = pool
+    .forward_local(route, "127.0.0.1:5432".parse()?, "db.intern".into(), 5432)
+    .await?;
+println!("lauscht auf {}", forward.local_addr());
+let mut status = forward.status();
+status.changed().await?;
+println!("aktiv: {}, Fehler: {:?}", status.borrow().active, status.borrow().error);
+```
+
+- Erst wird der Port gebunden, dann die Route aufgebaut. Ist der Port belegt, endet der Aufruf in `SshError::PortInUse` mit der Adresse, bevor eine Verbindung entsteht; Fehler beim Aufbau der Route kommen unverändert als `SshError::Hop`.
+- Die `LocalForward` hält eine `Lease` auf die Route, solange sie lebt. Ist die Verbindung beendet, wenn sich ein Client verbindet, baut sie die Route für diesen Client einmal neu auf.
+- `ForwardStatus` nennt die aktiven Verbindungen und als `HopFailure` den Grund, aus dem die letzte Verbindung nicht weitergeleitet werden konnte, etwa `ChannelRefused`, wenn am Ziel nichts lauscht. Der Port lauscht danach weiter; die nächste gelungene Verbindung leert den Fehler.
+- Drop beendet das Lauschen und jede weitergeleitete Verbindung und gibt die `Lease` zurück. Die Weiterleitung läuft in Tasks der Tokio-Runtime, in der `forward_local` aufgerufen wurde.
+- An welche Adresse gebunden wird, entscheidet die App; `127.0.0.1` hält den Port aus dem Netz.
+
 ## SFTP
 
 `Session::open_sftp` startet das Subsystem `sftp` auf einem neuen Kanal, auch auf einer `Lease` hinter Jump Hosts, und gibt eine `russh_sftp::client::SftpSession` zurück. Das Crate exportiert `russh_sftp` mit, damit die Apps dieselbe Version nutzen.

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use amiscara_ssh::{
-    ChannelMsg, HopState, HostKeyPolicy, Identity, PoolConfig, PtySize, Route, Session,
+    ChannelMsg, HopFailure, HopState, HostKeyPolicy, Identity, PoolConfig, PtySize, Route, Session,
     SessionPool, Shell, ShellEvent, SshError, SshTarget, Zeroizing, keys,
 };
 use tokio::io::AsyncWriteExt;
@@ -378,5 +378,92 @@ async fn dropped_connection_ends_the_command() -> TestResult {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    Ok(())
+}
+
+/// Reads the first bytes a connection to `addr` gets, up to 4.
+async fn banner(addr: std::net::SocketAddr) -> Result<String, Box<dyn std::error::Error>> {
+    use tokio::io::AsyncReadExt;
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let mut head = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut head)).await??;
+    Ok(String::from_utf8_lossy(&head).into_owned())
+}
+
+/// Waits until `wanted` holds for the status of `forward`.
+async fn wait_status(
+    forward: &amiscara_ssh::LocalForward,
+    wanted: impl Fn(&amiscara_ssh::ForwardStatus) -> bool,
+) -> TestResult {
+    let mut status = forward.status();
+    tokio::time::timeout(Duration::from_secs(10), status.wait_for(|s| wanted(s))).await??;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn local_forward_reaches_the_server_port() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let pool = SessionPool::new(PoolConfig::default());
+    let route = Route::direct(target(key_identity(), tofu(&dir)));
+    let forward = pool
+        .forward_local(
+            route.clone(),
+            ([127, 0, 0, 1], 0).into(),
+            "127.0.0.1".into(),
+            22,
+        )
+        .await?;
+    let local = forward.local_addr();
+    assert_ne!(local.port(), 0);
+
+    {
+        use tokio::io::AsyncReadExt;
+        let mut stream = tokio::net::TcpStream::connect(local).await?;
+        let mut head = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut head)).await??;
+        assert_eq!(&head, b"SSH-");
+        wait_status(&forward, |s| s.active == 1 && s.error.is_none()).await?;
+    }
+    wait_status(&forward, |s| s.active == 0).await?;
+    assert_eq!(banner(local).await?, "SSH-");
+
+    // The port is taken while the forward lives.
+    let taken = pool
+        .forward_local(route.clone(), local, "127.0.0.1".into(), 22)
+        .await;
+    assert!(
+        matches!(taken, Err(SshError::PortInUse(addr)) if addr == local),
+        "{taken:?}"
+    );
+
+    drop(forward);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::net::TcpListener::bind(local) {
+            Ok(_) => break,
+            Err(err) if tokio::time::Instant::now() > deadline => {
+                return Err(format!("{local} not free 2 s after the drop: {err}").into());
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn local_forward_reports_a_refused_target() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let pool = SessionPool::new(PoolConfig::default());
+    let route = Route::direct(target(key_identity(), tofu(&dir)));
+    // Nothing listens on port 1 in the container.
+    let forward = pool
+        .forward_local(route, ([127, 0, 0, 1], 0).into(), "127.0.0.1".into(), 1)
+        .await?;
+    let stream = tokio::net::TcpStream::connect(forward.local_addr()).await?;
+    wait_status(&forward, |s| s.error == Some(HopFailure::ChannelRefused)).await?;
+    assert_eq!(forward.status().borrow().active, 0);
+    drop(stream);
     Ok(())
 }
