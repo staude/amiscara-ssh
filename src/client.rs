@@ -77,8 +77,10 @@ pub struct SshTarget {
     /// Answers questions of the server during sign-in, for example a
     /// one-time code after the key. Asked only if the server accepted
     /// [`SshTarget::identity`] as a partial success and still wants
-    /// keyboard-interactive; a refused identity is never followed by a
-    /// question. `None` ends there in [`SshError::AuthFailed`].
+    /// keyboard-interactive, or if it offers a password sign-in only by
+    /// keyboard-interactive and asks more than the password there; a refused
+    /// key is never followed by a question. `None` ends there in
+    /// [`SshError::AuthFailed`].
     pub keyboard_interactive: Option<Arc<dyn KeyboardInteractive>>,
 }
 
@@ -235,24 +237,47 @@ impl Session {
                 remaining_methods,
                 partial_success,
             } => {
-                // Only a server that accepted the credentials and wants more
-                // asks; a refused key or password stays a refusal.
-                let prompter = target
-                    .keyboard_interactive
-                    .as_ref()
-                    .filter(|_| {
-                        partial_success
-                            && remaining_methods.contains(&MethodKind::KeyboardInteractive)
-                    })
-                    .ok_or_else(failed)?;
-                let signed_in = authenticate_keyboard_interactive(
-                    &mut handle,
-                    target,
-                    prompter.as_ref(),
-                    reporter_ref.as_ref(),
-                    &mut asked,
-                )
-                .await?;
+                let keyboard = remaining_methods.contains(&MethodKind::KeyboardInteractive);
+                let password = match &target.identity {
+                    Identity::Password(password) => Some(password),
+                    _ => None,
+                };
+                let prompter = target.keyboard_interactive.as_deref();
+                let signed_in = if partial_success && keyboard {
+                    // A server that accepted the credentials and wants more
+                    // asks the user; without a prompter that is a refusal.
+                    let prompter = prompter.ok_or_else(failed)?;
+                    authenticate_keyboard_interactive(
+                        &mut handle,
+                        target,
+                        Some(prompter),
+                        None,
+                        reporter_ref.as_ref(),
+                        &mut asked,
+                    )
+                    .await?
+                } else if !partial_success
+                    && keyboard
+                    && password.is_some()
+                    && !remaining_methods.contains(&MethodKind::Password)
+                {
+                    // A server that takes passwords only by
+                    // keyboard-interactive (PAM) gets the password there. One
+                    // that offers `password` again refused the password
+                    // itself; it is not sent a second time.
+                    authenticate_keyboard_interactive(
+                        &mut handle,
+                        target,
+                        prompter,
+                        password,
+                        reporter_ref.as_ref(),
+                        &mut asked,
+                    )
+                    .await?
+                } else {
+                    // A refused key or password stays a refusal.
+                    false
+                };
                 if !signed_in {
                     return Err(failed());
                 }
@@ -446,10 +471,17 @@ struct Asked {
 /// several keyboard-interactive steps passed) starts the next step within
 /// the same attempt. `Ok(false)` is a refusal, a cancelled question ends in
 /// [`SshError::Cancelled`].
+///
+/// With `password`, the first request with a single hidden question gets the
+/// password, without asking `prompter`; that is how servers ask for it
+/// through PAM. A refusal after the password ends the sign-in, so a wrong
+/// password is not sent again. Without `prompter`, any other question is a
+/// refusal.
 async fn authenticate_keyboard_interactive(
     handle: &mut Handle<HostKeyCheck>,
     target: &SshTarget,
-    prompter: &dyn KeyboardInteractive,
+    prompter: Option<&dyn KeyboardInteractive>,
+    password: Option<&Zeroizing<String>>,
     reporter: Option<&Reporter>,
     asked: &mut Asked,
 ) -> Result<bool, SshError> {
@@ -457,6 +489,7 @@ async fn authenticate_keyboard_interactive(
         Some(reporter) => (reporter.route(), reporter.index()),
         None => (vec![target.label()], 0),
     };
+    let mut password_sent = false;
     let mut attempt = 1;
     let mut steps = 0;
     while attempt <= KEYBOARD_ROUNDS {
@@ -478,6 +511,9 @@ async fn authenticate_keyboard_interactive(
                         return Ok(false);
                     }
                     if !partial_success {
+                        if password_sent {
+                            return Ok(false);
+                        }
                         attempt += 1;
                     }
                     break;
@@ -493,6 +529,20 @@ async fn authenticate_keyboard_interactive(
                             .await?;
                         continue;
                     }
+                    if let Some(password) = password.filter(|_| {
+                        !password_sent && prompts.len() == 1 && prompts.iter().all(|p| !p.echo)
+                    }) {
+                        password_sent = true;
+                        reply = handle
+                            .authenticate_keyboard_interactive_respond(vec![
+                                password.as_str().to_owned(),
+                            ])
+                            .await?;
+                        continue;
+                    }
+                    let Some(prompter) = prompter else {
+                        return Ok(false);
+                    };
                     let expected = prompts.len();
                     let prompt = KeyboardPrompt {
                         route: route.clone(),

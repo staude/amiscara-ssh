@@ -1,0 +1,14 @@
+# Bastion with password by keyboard-interactive only: no `password` method,
+# sshd asks for the password through PAM, as many hosters do.
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PermitRootLogin no
+PubkeyAuthentication no
+PasswordAuthentication no
+KbdInteractiveAuthentication yes
+UsePAM yes
+AllowTcpForwarding yes
+AllowAgentForwarding no
+X11Forwarding no
+PrintMotd no
+LogLevel VERBOSE
