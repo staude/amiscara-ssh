@@ -44,6 +44,31 @@ impl Session {
     /// agent; a server that refuses ends in
     /// `SshError::Refused("agent forwarding")`.
     pub async fn open_shell(&self, term: &str, size: PtySize) -> Result<Shell, SshError> {
+        self.open_pty(term, size, None).await
+    }
+
+    /// Like [`Session::open_shell`], but the server runs `command` in the
+    /// PTY instead of the login shell, as `ssh -t host 'command'` does. The
+    /// shell ends when the command ends. A server that refuses to run it
+    /// ends in `SshError::Refused("the command")`.
+    ///
+    /// The command goes to the server as it is; replace placeholders first,
+    /// for example with [`crate::expand`].
+    pub async fn open_command(
+        &self,
+        term: &str,
+        size: PtySize,
+        command: &str,
+    ) -> Result<Shell, SshError> {
+        self.open_pty(term, size, Some(command)).await
+    }
+
+    async fn open_pty(
+        &self,
+        term: &str,
+        size: PtySize,
+        command: Option<&str>,
+    ) -> Result<Shell, SshError> {
         let mut channel = self.channel_session().await?;
         let mut pending = VecDeque::new();
         if self.agent_forward() {
@@ -62,8 +87,16 @@ impl Session {
             )
             .await?;
         wait_for_reply(&mut channel, "a pty", &mut pending).await?;
-        channel.request_shell(true).await?;
-        wait_for_reply(&mut channel, "a shell", &mut pending).await?;
+        match command {
+            Some(command) => {
+                channel.exec(true, command).await?;
+                wait_for_reply(&mut channel, "the command", &mut pending).await?;
+            }
+            None => {
+                channel.request_shell(true).await?;
+                wait_for_reply(&mut channel, "a shell", &mut pending).await?;
+            }
+        }
         let (read, write) = channel.split();
         Ok(Shell {
             read: ShellReader { read, pending },

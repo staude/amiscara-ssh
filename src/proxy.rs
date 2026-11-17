@@ -31,7 +31,10 @@ const KILL_GRACE: Duration = Duration::from_secs(1);
 /// `-` (it would turn into an option of the command). Anything else, an
 /// unknown placeholder and an empty command are refused before anything
 /// starts.
-pub(crate) fn expand(command: &str, target: &SshTarget) -> Result<String, SshError> {
+///
+/// The same rules serve a command that runs on a jump host, see
+/// [`crate::Session::open_command`].
+pub fn expand(command: &str, target: &SshTarget) -> Result<String, SshError> {
     if command.trim().is_empty() {
         return Err(SshError::ProxyCommand("the command is empty".into()));
     }

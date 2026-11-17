@@ -5,7 +5,8 @@
 //! trust on first use, one pinned key, or a [`HostKeyVerifier`] that lets
 //! the app decide during the handshake) and signs in with an [`Identity`]:
 //! key file, SSH agent, key in memory or password. On the session,
-//! [`Session::open_shell`] starts a shell with a PTY, and `direct-tcpip` and
+//! [`Session::open_shell`] starts a shell with a PTY,
+//! [`Session::open_command`] runs a command in one instead, and `direct-tcpip` and
 //! `direct-streamlocal` channels reach ports and sockets on the server.
 //! [`keys`] generates, reads and describes client keys.
 //!
@@ -66,6 +67,7 @@ pub use error::SshError;
 pub use forward::{ForwardStatus, LocalForward};
 pub use host_key::{HostKeyPolicy, HostKeyVerdict, HostKeyVerifier, trust_host_key};
 pub use prompt::{KeyboardAnswer, KeyboardInteractive, KeyboardPrompt, PromptFuture, PromptLine};
+pub use proxy::expand;
 pub use shell::{PtySize, Shell, ShellEvent, ShellReader, ShellWriter};
 
 pub use russh::client::Msg;
