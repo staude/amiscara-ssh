@@ -4,6 +4,16 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-17
+
+### Fixed
+
+- Anmeldung mit Passwort an Servern, die Passwörter nur per keyboard-interactive annehmen (PAM, `PasswordAuthentication no`): Lehnt der Server die Methode `password` ab und bietet keyboard-interactive an, beantwortet die Sitzung dort die erste verdeckte Einzelfrage mit dem gespeicherten Passwort, ohne `SshTarget::keyboard_interactive` zu fragen; weitere Fragen (etwa ein Einmalcode) gehen wie bisher an den Prompter, ohne Prompter endet die Anmeldung in `AuthFailed`. Ein abgelehntes Passwort wird nicht ein zweites Mal geschickt; lehnt der Server nach dem Passwort ab, auch einen Code danach, endet die Anmeldung ohne weiteren Versuch in `AuthFailed`, und bietet der Server `password` weiter an, gibt es keinen Rückfall (staude/amiscara-connect#382).
+- Tests: Bastion `kbd-bastion` in der Testkette, die Passwörter nur per keyboard-interactive annimmt; Route über sie bis zum Ziel, direkte Anmeldung und falsches Passwort ohne Frage an den Prompter.
+- Das Crate baut unter Linux wieder mit `-D warnings` (unbenutzte Imports in `src/forward.rs` seit 0.7.0).
+
+## [0.7.0] - 2026-11-10
+
 ### Added
 
 - Lokale Port-Weiterleitung: `SessionPool::forward_local` lauscht auf einer lokalen Adresse und leitet jede Verbindung über `direct-tcpip` an Host und Port hinter dem Ziel einer `Route`, über die geteilten Sprünge des Pools. `LocalForward` nennt die echte Adresse (auch bei Port 0) und als `ForwardStatus` die aktiven Verbindungen und den letzten Fehler; eine beendete Verbindung wird für den nächsten Client einmal neu aufgebaut, Drop beendet alles und gibt die `Lease` zurück. Ein Port, auf dem ein anderes Programm an `0.0.0.0` lauscht, gilt als belegt, auch auf macOS (staude/amiscara-connect#54).
@@ -13,11 +23,6 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 - Neue Variante `SshError::PortInUse` mit der belegten Adresse, `HopFailure::from` ordnet sie `Other` zu; wer vollständig auf `SshError` matcht, ergänzt sie. Sie zählt nicht zu `needs_user`.
 - Der Testserver der Container-Tests erlaubt TCP-Weiterleitungen (`AllowTcpForwarding yes`).
-
-### Fixed
-
-- Anmeldung mit Passwort an Servern, die Passwörter nur per keyboard-interactive annehmen (PAM, `PasswordAuthentication no`): Lehnt der Server die Methode `password` ab und bietet keyboard-interactive an, beantwortet die Sitzung dort die erste verdeckte Einzelfrage mit dem gespeicherten Passwort, ohne `SshTarget::keyboard_interactive` zu fragen; weitere Fragen (etwa ein Einmalcode) gehen wie bisher an den Prompter, ohne Prompter endet die Anmeldung in `AuthFailed`. Ein abgelehntes Passwort wird nicht ein zweites Mal geschickt; lehnt der Server nach dem Passwort ab, auch einen Code danach, endet die Anmeldung ohne weiteren Versuch in `AuthFailed`, und bietet der Server `password` weiter an, gibt es keinen Rückfall (staude/amiscara-connect#382).
-- Tests: Bastion `kbd-bastion` in der Testkette, die Passwörter nur per keyboard-interactive annimmt; Route über sie bis zum Ziel, direkte Anmeldung und falsches Passwort ohne Frage an den Prompter.
 
 ## [0.6.0] - 2026-11-09
 
@@ -89,7 +94,9 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/staude/amiscara-ssh/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/staude/amiscara-ssh/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/staude/amiscara-ssh/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/staude/amiscara-ssh/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/staude/amiscara-ssh/compare/v0.3.0...v0.4.0
