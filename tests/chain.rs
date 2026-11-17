@@ -7,8 +7,9 @@
 //!
 //! Index 0 is the bastion, 1 the jump, 2 the target. The second bastion,
 //! `otp-bastion`, wants a one-time code after the key, so its routes ask the
-//! test's prompter. The tests stop and start containers, so they run one at a
-//! time (`--test-threads=1`).
+//! test's prompter. The third, `kbd-bastion`, takes the password only by
+//! keyboard-interactive. The tests stop and start containers, so they run one
+//! at a time (`--test-threads=1`).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -41,6 +42,13 @@ fn otp_port() -> u16 {
         .ok()
         .and_then(|port| port.parse().ok())
         .unwrap_or(2224)
+}
+
+fn kbd_port() -> u16 {
+    std::env::var("AMISCARA_SSH_KBD_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(2225)
 }
 
 fn strict() -> HostKeyPolicy {
@@ -94,6 +102,20 @@ fn chain() -> Route {
         jumps: vec![bastion(), jump()],
         target: target(),
         proxy_command: None,
+    }
+}
+
+/// The bastion that takes the password only by keyboard-interactive, without
+/// a prompter.
+fn kbd_bastion(password: &str) -> SshTarget {
+    SshTarget {
+        host: "127.0.0.1".into(),
+        port: kbd_port(),
+        user: "kbd-user".into(),
+        identity: Identity::Password(Zeroizing::new(password.into())),
+        host_key: strict(),
+        agent_forward: false,
+        keyboard_interactive: None,
     }
 }
 
@@ -895,5 +917,44 @@ async fn local_forward_over_two_jumps_reaches_the_target_port() -> TestResult {
     drain(&mut events);
     drop(forward);
     wait_closed(&mut events, &[0, 1, 2], Duration::from_secs(10)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn password_by_keyboard_interactive_reaches_the_target() -> TestResult {
+    let pool = SessionPool::new(PoolConfig::default());
+    let route = Route {
+        jumps: vec![kbd_bastion("kbd-pw"), jump()],
+        target: target(),
+        proxy_command: None,
+    };
+    let lease = pool.connect(&route).await?;
+    shell_line(&lease, "hostname", "target").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn password_by_keyboard_interactive_signs_in_directly() -> TestResult {
+    let session = Session::connect(&kbd_bastion("kbd-pw")).await?;
+    // Debian's sh writes its prompt before the output: a line break first.
+    shell_line(&session, "echo; hostname", "kbd-bastion").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn wrong_password_by_keyboard_interactive_is_refused_without_asking() -> TestResult {
+    let prompter = Prompter::new(Answer::Cancel);
+    let mut bastion = kbd_bastion("falsch");
+    bastion.keyboard_interactive = Some(Arc::clone(&prompter) as Arc<dyn KeyboardInteractive>);
+    let result = Session::connect(&bastion).await;
+    assert!(
+        matches!(result, Err(SshError::AuthFailed(_))),
+        "{:?}",
+        result.err()
+    );
+    assert!(prompter.asked().is_empty(), "{:?}", prompter.asked());
     Ok(())
 }

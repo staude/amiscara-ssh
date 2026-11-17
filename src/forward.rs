@@ -1,7 +1,7 @@
 //! Local port forwarding over a [`Route`]: a local TCP port whose
 //! connections reach `host:port` as seen from the target of the route.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -134,8 +134,8 @@ fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     if addr.port() != 0 && !addr.ip().is_unspecified() {
         let wildcard = match addr.ip() {
-            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
         };
         let probe = socket(wildcard)?;
         // Without it a connection of an earlier forward in `TIME_WAIT` would count as taken.

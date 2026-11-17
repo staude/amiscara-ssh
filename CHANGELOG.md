@@ -14,6 +14,11 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Neue Variante `SshError::PortInUse` mit der belegten Adresse, `HopFailure::from` ordnet sie `Other` zu; wer vollständig auf `SshError` matcht, ergänzt sie. Sie zählt nicht zu `needs_user`.
 - Der Testserver der Container-Tests erlaubt TCP-Weiterleitungen (`AllowTcpForwarding yes`).
 
+### Fixed
+
+- Anmeldung mit Passwort an Servern, die Passwörter nur per keyboard-interactive annehmen (PAM, `PasswordAuthentication no`): Lehnt der Server die Methode `password` ab und bietet keyboard-interactive an, beantwortet die Sitzung dort die erste verdeckte Einzelfrage mit dem gespeicherten Passwort, ohne `SshTarget::keyboard_interactive` zu fragen; weitere Fragen (etwa ein Einmalcode) gehen wie bisher an den Prompter, ohne Prompter endet die Anmeldung in `AuthFailed`. Ein abgelehntes Passwort wird nicht ein zweites Mal geschickt; lehnt der Server nach dem Passwort ab, auch einen Code danach, endet die Anmeldung ohne weiteren Versuch in `AuthFailed`, und bietet der Server `password` weiter an, gibt es keinen Rückfall (staude/amiscara-connect#382).
+- Tests: Bastion `kbd-bastion` in der Testkette, die Passwörter nur per keyboard-interactive annimmt; Route über sie bis zum Ziel, direkte Anmeldung und falsches Passwort ohne Frage an den Prompter.
+
 ## [0.6.0] - 2026-11-09
 
 ### Added
