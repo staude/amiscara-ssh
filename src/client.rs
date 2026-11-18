@@ -481,7 +481,10 @@ struct Asked {
 /// sign-in, so a wrong password is not sent again. A refusal after the user
 /// answered a question (a wrong one-time code) starts the next attempt. A
 /// server that took the password as a step of its own (partial success)
-/// keeps it; there the password is not sent again in later attempts. A
+/// keeps it; there the password is not sent again, later questions go to
+/// `prompter`. The password question is recognised only as the first single
+/// hidden question of an attempt; a server that asks only for the code in a
+/// later attempt gets the password there and ends the sign-in. A
 /// server that asks for the code even after a wrong password cannot be told
 /// apart; there the password goes once per attempt. Without `prompter`, any
 /// other question is a refusal.
@@ -502,7 +505,8 @@ async fn authenticate_keyboard_interactive(
     let mut password_sent = false;
     let mut asked_after_password = false;
     // The server took the password as a step of its own (partial success);
-    // it keeps that step and does not ask for the password again.
+    // later questions go to the prompter, even a second password question
+    // of a server that runs PAM again for each step.
     let mut password_accepted = false;
     let mut attempt = 1;
     let mut steps = 0;
