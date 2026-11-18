@@ -4,6 +4,11 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+### Fixed
+
+- `Session::open_shell` und `Session::open_command` schließen den Kanal, wenn der Server eine Anfrage darauf ablehnt (Agent-Weiterleitung, PTY, Befehl oder Shell). Bisher blieb er offen und zählte auf der geteilten Verbindung gegen die Grenze des Servers für Sitzungen (`MaxSessions`), sodass nach einigen abgelehnten Versuchen auch neue Kanäle scheiterten (staude/amiscara-connect#394).
+- Tests: elf abgelehnte Shells hintereinander an `kbd-bastion`, danach öffnet noch ein Kanal.
+
 ## [0.7.2] - 2026-11-18
 
 ### Added

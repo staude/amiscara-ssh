@@ -71,38 +71,71 @@ impl Session {
     ) -> Result<Shell, SshError> {
         let mut channel = self.channel_session().await?;
         let mut pending = VecDeque::new();
-        if self.agent_forward() {
-            channel.agent_forward(true).await?;
-            wait_for_reply(&mut channel, "agent forwarding", &mut pending).await?;
-        }
-        channel
-            .request_pty(
-                true,
-                term,
-                u32::from(size.cols),
-                u32::from(size.rows),
-                0,
-                0,
-                &[],
-            )
-            .await?;
-        wait_for_reply(&mut channel, "a pty", &mut pending).await?;
-        match command {
-            Some(command) => {
-                channel.exec(true, command).await?;
-                wait_for_reply(&mut channel, "the command", &mut pending).await?;
+        match request_pty(
+            &mut channel,
+            term,
+            size,
+            command,
+            &mut pending,
+            self.agent_forward(),
+        )
+        .await
+        {
+            Ok(()) => {
+                let (read, write) = channel.split();
+                Ok(Shell {
+                    read: ShellReader { read, pending },
+                    write: ShellWriter { write },
+                })
             }
-            None => {
-                channel.request_shell(true).await?;
-                wait_for_reply(&mut channel, "a shell", &mut pending).await?;
+            Err(err) => {
+                // A refused channel stays open on the server until closed;
+                // left behind, it counts against the server's session limit
+                // of the shared connection. The close may fail on its own,
+                // the request's error is what matters.
+                let _ = channel.close().await;
+                Err(err)
             }
         }
-        let (read, write) = channel.split();
-        Ok(Shell {
-            read: ShellReader { read, pending },
-            write: ShellWriter { write },
-        })
     }
+}
+
+/// Asks for agent forwarding, the PTY and the command or login shell.
+async fn request_pty(
+    channel: &mut Channel<client::Msg>,
+    term: &str,
+    size: PtySize,
+    command: Option<&str>,
+    pending: &mut VecDeque<ShellEvent>,
+    agent_forward: bool,
+) -> Result<(), SshError> {
+    if agent_forward {
+        channel.agent_forward(true).await?;
+        wait_for_reply(channel, "agent forwarding", pending).await?;
+    }
+    channel
+        .request_pty(
+            true,
+            term,
+            u32::from(size.cols),
+            u32::from(size.rows),
+            0,
+            0,
+            &[],
+        )
+        .await?;
+    wait_for_reply(channel, "a pty", pending).await?;
+    match command {
+        Some(command) => {
+            channel.exec(true, command).await?;
+            wait_for_reply(channel, "the command", pending).await?;
+        }
+        None => {
+            channel.request_shell(true).await?;
+            wait_for_reply(channel, "a shell", pending).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Waits for the answer to a request sent with `want_reply`. Output that
