@@ -4,6 +4,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-18
+
 ### Added
 
 - `Session::open_command` lässt den Server einen Befehl in einer PTY starten statt der Login-Shell, wie `ssh -t host 'befehl'`; das Ende des Befehls beendet die `Shell`, ein abgelehnter Befehl endet in `SshError::Refused("the command")`. Für Sprungrechner, die keine Weiterleitung erlauben und nur einen eigenen Befehl zum Ziel anbieten (staude/amiscara-connect#386).
@@ -100,7 +102,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/staude/amiscara-ssh/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/staude/amiscara-ssh/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/staude/amiscara-ssh/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/staude/amiscara-ssh/compare/v0.5.0...v0.6.0
