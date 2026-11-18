@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Local jump host chain for the chain tests: client -> bastion -> jump -> target,
-# client -> otp-bastion -> jump -> target with a one-time code, and
-# client -> kbd-bastion -> jump -> target with the password by keyboard-interactive.
+# client -> otp-bastion -> jump -> target with a one-time code,
+# client -> kbd-bastion -> jump -> target with the password by keyboard-interactive,
+# and client -> kbd-otp-bastion -> jump -> target with password and one-time code
+# in the same keyboard-interactive sign-in.
 #
 #   scripts/ssh-testkette.sh start   keys, images and containers
 #   scripts/ssh-testkette.sh stop    removes containers and networks
@@ -15,6 +17,9 @@
 # user `otp-user` with key id_otp and then the TOTP code of totp_secret.
 # The bastion that takes the password only by keyboard-interactive listens on
 # 127.0.0.1:${AMISCARA_SSH_KBD_PORT:-2225}, user `kbd-user` with password `kbd-pw`.
+# The bastion that asks for password and one-time code by keyboard-interactive
+# listens on 127.0.0.1:${AMISCARA_SSH_KBD_OTP_PORT:-2226}, user `kbd-otp-user`
+# with password `kbd-otp-pw` and then the TOTP code of totp_secret.
 # Keys, host keys, TOTP secret and known_hosts live in target/ssh-testkette/.
 # Needs Docker.
 set -euo pipefail
@@ -24,14 +29,15 @@ state="$root/target/ssh-testkette"
 port="${AMISCARA_SSH_CHAIN_PORT:-2223}"
 otp_port="${AMISCARA_SSH_OTP_PORT:-2224}"
 kbd_port="${AMISCARA_SSH_KBD_PORT:-2225}"
+kbd_otp_port="${AMISCARA_SSH_KBD_OTP_PORT:-2226}"
 export AMISCARA_SSH_CHAIN_PORT="$port" AMISCARA_SSH_OTP_PORT="$otp_port" \
-  AMISCARA_SSH_KBD_PORT="$kbd_port"
+  AMISCARA_SSH_KBD_PORT="$kbd_port" AMISCARA_SSH_KBD_OTP_PORT="$kbd_otp_port"
 compose=(docker compose -f "$root/tests/kette/compose.yml")
 
 keys() {
   mkdir -p "$state"
   chmod 700 "$state"
-  for name in id_jump id_target id_otp host_bastion host_jump host_target host_otp host_kbd; do
+  for name in id_jump id_target id_otp host_bastion host_jump host_target host_otp host_kbd host_kbd_otp; do
     if [ ! -f "$state/$name" ]; then
       ssh-keygen -q -t ed25519 -N '' -C "amiscara-ssh-chain-$name" -f "$state/$name"
     fi
@@ -46,6 +52,7 @@ keys() {
     echo "[127.0.0.1]:$port $(cut -d' ' -f1,2 "$state/host_bastion.pub")"
     echo "[127.0.0.1]:$otp_port $(cut -d' ' -f1,2 "$state/host_otp.pub")"
     echo "[127.0.0.1]:$kbd_port $(cut -d' ' -f1,2 "$state/host_kbd.pub")"
+    echo "[127.0.0.1]:$kbd_otp_port $(cut -d' ' -f1,2 "$state/host_kbd_otp.pub")"
     echo "jump $(cut -d' ' -f1,2 "$state/host_jump.pub")"
     echo "target $(cut -d' ' -f1,2 "$state/host_target.pub")"
   } >"$state/known_hosts"
@@ -63,7 +70,7 @@ start() {
     cat "$state/compose-up.log" >&2
     return 1
   fi
-  for hop in bastion otp-bastion kbd-bastion jump target; do
+  for hop in bastion otp-bastion kbd-bastion kbd-otp-bastion jump target; do
     local ok=''
     for _ in $(seq 1 100); do
       if ready "$hop"; then ok=1; break; fi
@@ -75,7 +82,7 @@ start() {
       return 1
     fi
   done
-  echo "Kette läuft, Bastion auf 127.0.0.1:${port}, Bastion mit Einmalcode auf 127.0.0.1:${otp_port}, Bastion mit Passwort per keyboard-interactive auf 127.0.0.1:${kbd_port}."
+  echo "Kette läuft, Bastion auf 127.0.0.1:${port}, Bastion mit Einmalcode auf 127.0.0.1:${otp_port}, Bastion mit Passwort per keyboard-interactive auf 127.0.0.1:${kbd_port}, Bastion mit Passwort und Einmalcode per keyboard-interactive auf 127.0.0.1:${kbd_otp_port}."
 }
 
 stop() {

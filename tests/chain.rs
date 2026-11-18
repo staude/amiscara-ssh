@@ -8,8 +8,10 @@
 //! Index 0 is the bastion, 1 the jump, 2 the target. The second bastion,
 //! `otp-bastion`, wants a one-time code after the key, so its routes ask the
 //! test's prompter. The third, `kbd-bastion`, takes the password only by
-//! keyboard-interactive. The tests stop and start containers, so they run one
-//! at a time (`--test-threads=1`).
+//! keyboard-interactive. The fourth, `kbd-otp-bastion`, asks for the password
+//! and then a one-time code in the same keyboard-interactive sign-in. The
+//! tests stop and start containers, so they run one at a time
+//! (`--test-threads=1`).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -49,6 +51,13 @@ fn kbd_port() -> u16 {
         .ok()
         .and_then(|port| port.parse().ok())
         .unwrap_or(2225)
+}
+
+fn kbd_otp_port() -> u16 {
+    std::env::var("AMISCARA_SSH_KBD_OTP_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(2226)
 }
 
 fn strict() -> HostKeyPolicy {
@@ -137,6 +146,8 @@ enum Answer {
     Code,
     /// A wrong code first, then the current one.
     WrongThenCode,
+    /// Always a wrong code.
+    Wrong,
     /// Cancels the question.
     Cancel,
     /// Never answers.
@@ -186,16 +197,9 @@ impl KeyboardInteractive for Prompter {
             Answer::Cancel => None,
             Answer::Hang => return Box::pin(std::future::pending()),
             Answer::Code => totp().ok(),
-            Answer::WrongThenCode if count == 1 => totp().ok().map(|code| {
-                // Shifted by one in every digit: never a code of the window.
-                code.chars()
-                    .map(|c| {
-                        c.to_digit(10)
-                            .map_or(c, |d| char::from(b'0' + ((d + 1) % 10) as u8))
-                    })
-                    .collect()
-            }),
+            Answer::WrongThenCode if count == 1 => totp().ok().map(|code| shifted(&code)),
             Answer::WrongThenCode => totp().ok(),
+            Answer::Wrong => totp().ok().map(|code| shifted(&code)),
         };
         let keep_open = self.keep_open;
         let delay = self.delay;
@@ -206,6 +210,32 @@ impl KeyboardInteractive for Prompter {
                 keep_open,
             })
         })
+    }
+}
+
+/// A wrong code: shifted by one in every digit, never a code of the window.
+fn shifted(code: &str) -> String {
+    code.chars()
+        .map(|c| {
+            c.to_digit(10)
+                .map_or(c, |d| char::from(b'0' + ((d + 1) % 10) as u8))
+        })
+        .collect()
+}
+
+/// The bastion that asks for the password and then a one-time code by
+/// keyboard-interactive; the password goes without `prompter`, the code is
+/// asked of it.
+fn kbd_otp_bastion(password: &str, prompter: &Arc<Prompter>) -> SshTarget {
+    let prompter: Arc<dyn KeyboardInteractive> = Arc::clone(prompter) as _;
+    SshTarget {
+        host: "127.0.0.1".into(),
+        port: kbd_otp_port(),
+        user: "kbd-otp-user".into(),
+        identity: Identity::Password(Zeroizing::new(password.into())),
+        host_key: strict(),
+        agent_forward: false,
+        keyboard_interactive: Some(prompter),
     }
 }
 
@@ -978,5 +1008,52 @@ async fn refused_shell_closes_its_channel() -> TestResult {
     }
     let channel = session.channel_session().await?;
     channel.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn wrong_code_after_password_by_keyboard_interactive_is_asked_again() -> TestResult {
+    let prompter = Prompter::new(Answer::WrongThenCode);
+    let pool = SessionPool::new(PoolConfig::default());
+    let route = Route {
+        jumps: vec![kbd_otp_bastion("kbd-otp-pw", &prompter), jump()],
+        target: target(),
+        proxy_command: None,
+    };
+    let lease = pool.connect(&route).await?;
+    let attempts: Vec<u32> = prompter.asked().iter().map(|p| p.attempt).collect();
+    assert_eq!(attempts, vec![1, 2]);
+    shell_line(&lease, "hostname", "target").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn wrong_code_after_password_by_keyboard_interactive_three_times_is_refused() -> TestResult {
+    let prompter = Prompter::new(Answer::Wrong);
+    let result = Session::connect(&kbd_otp_bastion("kbd-otp-pw", &prompter)).await;
+    assert!(
+        matches!(result, Err(SshError::AuthFailed(_))),
+        "{:?}",
+        result.err()
+    );
+    let attempts: Vec<u32> = prompter.asked().iter().map(|p| p.attempt).collect();
+    assert_eq!(attempts, vec![1, 2, 3]);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn wrong_password_before_code_by_keyboard_interactive_is_refused_without_asking() -> TestResult
+{
+    let prompter = Prompter::new(Answer::Code);
+    let result = Session::connect(&kbd_otp_bastion("falsch", &prompter)).await;
+    assert!(
+        matches!(result, Err(SshError::AuthFailed(_))),
+        "{:?}",
+        result.err()
+    );
+    assert!(prompter.asked().is_empty(), "{:?}", prompter.asked());
     Ok(())
 }
