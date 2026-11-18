@@ -958,3 +958,25 @@ async fn wrong_password_by_keyboard_interactive_is_refused_without_asking() -> T
     assert!(prompter.asked().is_empty(), "{:?}", prompter.asked());
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testkette.sh run"]
+async fn refused_shell_closes_its_channel() -> TestResult {
+    // kbd-bastion refuses agent forwarding and allows sshd's default of 10
+    // sessions per connection: a refused channel left open would use one up.
+    let mut bastion = kbd_bastion("kbd-pw");
+    bastion.agent_forward = true;
+    let session = Session::connect(&bastion).await?;
+    let size = PtySize { cols: 80, rows: 24 };
+    for _ in 0..11 {
+        let result = session.open_shell("xterm-256color", size).await;
+        assert!(
+            matches!(&result, Err(SshError::Refused(what)) if what == "agent forwarding"),
+            "{:?}",
+            result.err()
+        );
+    }
+    let channel = session.channel_session().await?;
+    channel.close().await?;
+    Ok(())
+}
