@@ -246,6 +246,48 @@ async fn shell_killed_by_signal_reports_it() -> TestResult {
 
 #[tokio::test]
 #[ignore = "braucht scripts/ssh-testserver.sh start"]
+async fn command_runs_in_a_pty_and_ends_the_shell() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let session = Session::connect(&target(key_identity(), tofu(&dir))).await?;
+    let mut shell = session
+        .open_command(
+            "xterm-256color",
+            PtySize { cols: 80, rows: 24 },
+            "tty -s && echo pty-da; exit 7",
+        )
+        .await?;
+    let (output, exit) = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut output = Vec::new();
+        let mut exit = None;
+        while let Some(event) = shell.next().await {
+            match event {
+                ShellEvent::Output(bytes) => output.extend(bytes),
+                ShellEvent::Exit(status) => exit = Some(status),
+                ShellEvent::Signal(_) => {}
+            }
+        }
+        (output, exit)
+    })
+    .await?;
+    assert!(String::from_utf8_lossy(&output).contains("pty-da"));
+    assert_eq!(exit, Some(7));
+    session.disconnect().await?;
+    Ok(())
+}
+
+#[test]
+fn expand_fills_in_the_host() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let target = target(key_identity(), tofu(&dir));
+    assert_eq!(
+        amiscara_ssh::expand("ssh %h -p %p -l %r %%", &target)?,
+        format!("ssh {HOST} -p {} -l {USER} %", port())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht scripts/ssh-testserver.sh start"]
 async fn sftp_creates_writes_reads_renames_and_removes() -> TestResult {
     let dir = tempfile::tempdir()?;
     let session = Session::connect(&target(key_identity(), tofu(&dir))).await?;

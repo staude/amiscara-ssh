@@ -4,6 +4,12 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+### Added
+
+- `Session::open_command` lässt den Server einen Befehl in einer PTY starten statt der Login-Shell, wie `ssh -t host 'befehl'`; das Ende des Befehls beendet die `Shell`, ein abgelehnter Befehl endet in `SshError::Refused("the command")`. Für Sprungrechner, die keine Weiterleitung erlauben und nur einen eigenen Befehl zum Ziel anbieten (staude/amiscara-connect#386).
+- `expand` ist öffentlich: dieselben Platzhalter `%h`, `%p`, `%r` und `%%` und dieselben Regeln wie beim ProxyCommand, für einen Befehl auf dem Sprungrechner.
+- Tests: Befehl in einer PTY mit Exit-Status, Platzhalter.
+
 ## [0.7.1] - 2026-11-17
 
 ### Fixed
