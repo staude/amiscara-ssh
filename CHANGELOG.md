@@ -4,6 +4,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-19
+
 ### Changed
 
 - Fragt ein Server per keyboard-interactive erst das Passwort und dann einen Einmalcode in derselben Anmeldung (PAM), wird ein abgelehnter Code bis zu drei Mal neu erfragt, wie bei den übrigen Einmalcodes. Das gespeicherte Passwort geht dabei je Versuch höchstens einmal hin, auf die erste verdeckte Einzelfrage des Versuchs, weil der Server nach jeder Ablehnung die ganze Anmeldung neu beginnt; nach einem Teilerfolg mit dem Passwort geht es nicht noch einmal hin. Eine Ablehnung direkt nach dem Passwort ohne Frage an den Prompter bleibt ein falsches Passwort und endet sofort in `AuthFailed`. Grenze: Fragt ein Server auch nach einem falschen Passwort noch den Code (PAM `required`), geht das Passwort bis zu drei Mal hin (staude/amiscara-connect#385).
@@ -112,7 +114,8 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 - Schlüssel erzeugen, lesen und Fingerprint (`keys`), aus `herdr-transport` von Amiscara Agents übernommen.
 - Lokaler SSH-Testserver (`scripts/ssh-testserver.sh`) und Container-Tests, in der CI als eigener Job.
 
-[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/staude/amiscara-ssh/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/staude/amiscara-ssh/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/staude/amiscara-ssh/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/staude/amiscara-ssh/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/staude/amiscara-ssh/compare/v0.6.0...v0.7.0
