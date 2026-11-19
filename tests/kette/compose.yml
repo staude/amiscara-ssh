@@ -1,7 +1,9 @@
 # Test chain of amiscara-ssh: client -> bastion -> jump -> target, and a
 # second bastion with one-time code: client -> otp-bastion -> jump -> target,
-# and a third that takes the password only by keyboard-interactive:
-# client -> kbd-bastion -> jump -> target.
+# a third that takes the password only by keyboard-interactive:
+# client -> kbd-bastion -> jump -> target, and a fourth that asks for the
+# password and then a one-time code in the same keyboard-interactive sign-in:
+# client -> kbd-otp-bastion -> jump -> target.
 # Only the bastions are reachable from outside, and only on 127.0.0.1; jump
 # and target sit in internal networks. Started by scripts/ssh-testkette.sh.
 name: amiscara-ssh-chain
@@ -38,6 +40,15 @@ services:
       - ../../target/ssh-testkette:/state:ro
     ports:
       - "127.0.0.1:${AMISCARA_SSH_KBD_PORT:-2225}:22"
+    networks: [aussen, mitte]
+  kbd-otp-bastion:
+    build: kbd-otp
+    image: amiscara-ssh-chain-kbd-otp
+    hostname: kbd-otp-bastion
+    volumes:
+      - ../../target/ssh-testkette:/state:ro
+    ports:
+      - "127.0.0.1:${AMISCARA_SSH_KBD_OTP_PORT:-2226}:22"
     networks: [aussen, mitte]
   jump:
     <<: *hop

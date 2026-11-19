@@ -1,0 +1,7 @@
+# Password first, then the one-time code. Debian's common-auth ends with
+# pam_deny as requisite after a wrong password, so the code is asked only
+# after the right one.
+@include common-auth
+auth required pam_google_authenticator.so
+@include common-account
+@include common-session

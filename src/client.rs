@@ -472,11 +472,22 @@ struct Asked {
 /// the same attempt. `Ok(false)` is a refusal, a cancelled question ends in
 /// [`SshError::Cancelled`].
 ///
-/// With `password`, the first request with a single hidden question gets the
-/// password, without asking `prompter`; that is how servers ask for it
-/// through PAM. A refusal after the password ends the sign-in, so a wrong
-/// password is not sent again. Without `prompter`, any other question is a
-/// refusal.
+/// With `password`, the first request of an attempt with a single hidden
+/// question gets the password, without asking `prompter`; that is how
+/// servers ask for it through PAM. The password goes at most once per
+/// attempt and only when the server asks for it: after a refusal, PAM starts
+/// the whole sign-in again and asks for the password first. A refusal after
+/// the password without a question to `prompter` in between ends the
+/// sign-in, so a wrong password is not sent again. A refusal after the user
+/// answered a question (a wrong one-time code) starts the next attempt. A
+/// server that took the password as a step of its own (partial success)
+/// keeps it; there the password is not sent again, later questions go to
+/// `prompter`. The password question is recognised only as the first single
+/// hidden question of an attempt; a server that asks only for the code in a
+/// later attempt gets the password there and ends the sign-in. A
+/// server that asks for the code even after a wrong password cannot be told
+/// apart; there the password goes once per attempt. Without `prompter`, any
+/// other question is a refusal.
 async fn authenticate_keyboard_interactive(
     handle: &mut Handle<HostKeyCheck>,
     target: &SshTarget,
@@ -489,7 +500,14 @@ async fn authenticate_keyboard_interactive(
         Some(reporter) => (reporter.route(), reporter.index()),
         None => (vec![target.label()], 0),
     };
+    // Both per attempt: the password went in this attempt, and the user
+    // answered a question after it.
     let mut password_sent = false;
+    let mut asked_after_password = false;
+    // The server took the password as a step of its own (partial success);
+    // later questions go to the prompter, even a second password question
+    // of a server that runs PAM again for each step.
+    let mut password_accepted = false;
     let mut attempt = 1;
     let mut steps = 0;
     while attempt <= KEYBOARD_ROUNDS {
@@ -510,11 +528,16 @@ async fn authenticate_keyboard_interactive(
                     if !remaining_methods.contains(&MethodKind::KeyboardInteractive) {
                         return Ok(false);
                     }
+                    if partial_success && password_sent {
+                        password_accepted = true;
+                    }
                     if !partial_success {
-                        if password_sent {
+                        if password_sent && !asked_after_password {
                             return Ok(false);
                         }
                         attempt += 1;
+                        password_sent = false;
+                        asked_after_password = false;
                     }
                     break;
                 }
@@ -530,7 +553,10 @@ async fn authenticate_keyboard_interactive(
                         continue;
                     }
                     if let Some(password) = password.filter(|_| {
-                        !password_sent && prompts.len() == 1 && prompts.iter().all(|p| !p.echo)
+                        !password_sent
+                            && !password_accepted
+                            && prompts.len() == 1
+                            && prompts.iter().all(|p| !p.echo)
                     }) {
                         password_sent = true;
                         reply = handle
@@ -571,6 +597,9 @@ async fn authenticate_keyboard_interactive(
                     }
                     asked.asked = true;
                     asked.keep_open = answer.keep_open;
+                    if password_sent {
+                        asked_after_password = true;
+                    }
                     let responses = answer
                         .responses
                         .iter()

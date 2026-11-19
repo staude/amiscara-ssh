@@ -4,6 +4,11 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+### Changed
+
+- Fragt ein Server per keyboard-interactive erst das Passwort und dann einen Einmalcode in derselben Anmeldung (PAM), wird ein abgelehnter Code bis zu drei Mal neu erfragt, wie bei den übrigen Einmalcodes. Das gespeicherte Passwort geht dabei je Versuch höchstens einmal hin, auf die erste verdeckte Einzelfrage des Versuchs, weil der Server nach jeder Ablehnung die ganze Anmeldung neu beginnt; nach einem Teilerfolg mit dem Passwort geht es nicht noch einmal hin. Eine Ablehnung direkt nach dem Passwort ohne Frage an den Prompter bleibt ein falsches Passwort und endet sofort in `AuthFailed`. Grenze: Fragt ein Server auch nach einem falschen Passwort noch den Code (PAM `required`), geht das Passwort bis zu drei Mal hin (staude/amiscara-connect#385).
+- Tests: Bastion `kbd-otp-bastion` in der Testkette, die per PAM Passwort und Einmalcode in einer Anmeldung verlangt; falscher und dann richtiger Code, drei falsche Codes, falsches Passwort ohne Frage an den Prompter.
+
 ### Fixed
 
 - `Session::open_shell` und `Session::open_command` schließen den Kanal, wenn der Server eine Anfrage darauf ablehnt (Agent-Weiterleitung, PTY, Befehl oder Shell). Bisher blieb er offen und zählte auf der geteilten Verbindung gegen die Grenze des Servers für Sitzungen (`MaxSessions`), sodass nach einigen abgelehnten Versuchen auch neue Kanäle scheiterten (staude/amiscara-connect#394).
