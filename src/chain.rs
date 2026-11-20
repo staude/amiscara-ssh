@@ -129,8 +129,14 @@ pub enum HopFailure {
     /// No TCP connection to the first hop.
     Unreachable,
     /// The hop before refused the `direct-tcpip` channel to this hop, for
-    /// example because it cannot resolve or reach it.
+    /// example because it cannot resolve or reach it. Trying again later
+    /// may work.
     ChannelRefused,
+    /// The hop before does not allow the `direct-tcpip` channel to this hop
+    /// at all (administratively prohibited or unknown channel type), for
+    /// example a login host with forwarding turned off. Trying again does
+    /// not help.
+    ChannelProhibited,
     /// Connecting and signing in took longer than
     /// [`PoolConfig::connect_timeout`].
     Timeout,
@@ -161,6 +167,10 @@ impl From<&SshError> for HopFailure {
             SshError::AuthFailed(_) => Self::AuthFailed,
             SshError::Cancelled(_) => Self::Cancelled,
             SshError::ProxyCommand(_) => Self::ProxyCommand,
+            SshError::Ssh(russh::Error::ChannelOpenFailure(
+                russh::ChannelOpenFailure::AdministrativelyProhibited
+                | russh::ChannelOpenFailure::UnknownChannelType,
+            )) => Self::ChannelProhibited,
             SshError::Ssh(russh::Error::ChannelOpenFailure(_)) => Self::ChannelRefused,
             SshError::Ssh(
                 russh::Error::Disconnect
@@ -824,6 +834,8 @@ impl SessionPool {
                     let stream = jump.open_via(hop).await.map_err(|e| {
                         let failure = if jump.is_closed() {
                             HopFailure::Closed
+                        } else if HopFailure::from(&e) == HopFailure::ChannelProhibited {
+                            HopFailure::ChannelProhibited
                         } else {
                             HopFailure::ChannelRefused
                         };
@@ -938,10 +950,29 @@ mod tests {
             HopFailure::from(&SshError::Timeout("u@h:22".into())),
             HopFailure::Timeout
         );
+        let refused =
+            |reason| HopFailure::from(&SshError::Ssh(russh::Error::ChannelOpenFailure(reason)));
         assert_eq!(
-            HopFailure::from(&SshError::Ssh(russh::Error::ChannelOpenFailure(
-                russh::ChannelOpenFailure::ConnectFailed
-            ))),
+            refused(russh::ChannelOpenFailure::AdministrativelyProhibited),
+            HopFailure::ChannelProhibited
+        );
+        assert_eq!(
+            refused(russh::ChannelOpenFailure::UnknownChannelType),
+            HopFailure::ChannelProhibited
+        );
+        assert_eq!(
+            refused(russh::ChannelOpenFailure::ConnectFailed),
+            HopFailure::ChannelRefused
+        );
+        assert_eq!(
+            refused(russh::ChannelOpenFailure::ResourceShortage),
+            HopFailure::ChannelRefused
+        );
+        assert_eq!(
+            refused(russh::ChannelOpenFailure::Other {
+                code: 42,
+                reason: "nope".into()
+            }),
             HopFailure::ChannelRefused
         );
         assert_eq!(
