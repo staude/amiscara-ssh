@@ -4,6 +4,13 @@ Alle nennenswerten Änderungen an diesem Projekt. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-20
+
+### Changed
+
+- `HopFailure::ChannelProhibited` trennt einen Sprungrechner, der den Kanal zum nächsten Sprung grundsätzlich nicht erlaubt (`AdministrativelyProhibited`, `UnknownChannelType`, etwa ein Login-Host mit abgeschalteter Weiterleitung), von `ChannelRefused`, das nun nur noch die übrigen Gründe meint (`ConnectFailed`, `ResourceShortage`, sonstige). Ein neuer Versuch hilft bei `ChannelProhibited` nicht. Neue Variante, deshalb neue Minor-Version (staude/amiscara-connect#397).
+- Tests: alle fünf Gründe einer Kanal-Ablehnung.
+
 ## [0.7.3] - 2026-11-19
 
 ### Changed
